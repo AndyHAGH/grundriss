@@ -1,7 +1,7 @@
 'use strict';
 /* Grundriss – einfaches 2D-CAD für Bestandspläne. Einheiten im Modell: Zentimeter, y zeigt nach unten. */
 (() => {
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const STORE_KEY = 'grundriss.projekt.v1';
 const SNAP_PX = 16;        // Fangradius in Bildschirm-Pixeln (Touch-/Stift-freundlich)
 const ORTHO_TOL = 6;       // Grad: Fanghilfe beim Zeichnen
@@ -1083,6 +1083,14 @@ cv.addEventListener('pointerdown', e => {
     const d = hitDim(sp);
     if (d) { sel = { type: 'dim', id: d.id, w1: d.w1, w2: d.w2 }; refresh(); return; }
     const w = hitWall(wp, tol);
+    // Strg+Klick auf eine zweite Wand: Abstand zwischen den beiden Wänden eingeben
+    if (w && (e.ctrlKey || e.metaKey || e.shiftKey) && sel?.type === 'wall' && sel.ids[0] !== w.id) {
+      const w1 = wallById(sel.ids[0]);
+      if (!parallel(w1, w)) { toast('Die Wände sind nicht parallel – erst Stufe 2 (Winkel) ausführen'); return; }
+      const ex = doc.dims.find(d => d.kind === 'dist' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
+      sel = ex ? { type: 'dim', id: ex.id, w1: ex.w1, w2: ex.w2 } : { type: 'dim', id: null, w1: w1.id, w2: w.id };
+      refresh(); return;
+    }
     if (w) { sel = { type: 'wall', ids: [w.id] }; meas = defaultMeasure(w, wp); refresh(); return; }
     sel = null; startPan(sp); refresh(); return;
   }
@@ -1291,7 +1299,8 @@ function renderProps() {
       <input id="mIn" inputmode="decimal" placeholder="m" value="${fmtM(w.mass ? w.mass.v : cur)}"><button class="primary" data-act="mSet">Übernehmen</button>
       <span class="sep"></span>
       <button data-act="mSide">Andere Seite</button><button data-act="mAnchor">Anderes Ende fest</button>
-      ${w.mass ? '<button class="danger" data-act="mDel">Maß löschen</button>' : ''}`;
+      ${w.mass ? '<button class="danger" data-act="mDel">Maß löschen</button>' : ''}
+      <span class="info">Strg+Klick auf zweite Wand = Abstand</span>`;
   } else if (stage === 4) {
     const n = doc.walls.filter(w => w.mass).length, free = doc.walls.filter(w => w.dir == null).length;
     p.innerHTML = `<span class="info">${n} von ${doc.walls.length} Wänden bemaßt · ${doc.dims.filter(d => d.kind === 'dist').length} Abstände${free ? ` · <b>${free} Wände ohne feste Richtung – erst Stufe 2</b>` : ''}</span>`;
