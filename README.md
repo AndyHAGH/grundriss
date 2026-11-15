@@ -8,7 +8,7 @@ für iPad und Apple Pencil vorbereitet.
 
 ## Starten
 - Lokal: `powershell -ExecutionPolicy Bypass -File tools/serve.ps1` ausführen, dann http://localhost:8765 öffnen.
-- Online: über GitHub Pages veröffentlichen (Repository → Settings → Pages → Branch `main`, Ordner `/`).
+- Online: https://andyhagh.github.io/grundriss/ (GitHub Pages, Branch `main`). Auf dem PC in Edge/Chrome über das Symbol in der Adressleiste als App installierbar.
 
 ## Bedienung
 | Stufe | Funktion |
