@@ -1,7 +1,7 @@
 'use strict';
 /* Grundriss – einfaches 2D-CAD für Bestandspläne. Einheiten im Modell: Zentimeter, y zeigt nach unten. */
 (() => {
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
 const STORE_KEY = 'grundriss.projekt.v1';
 const SNAP_PX = 16;        // Fangradius in Bildschirm-Pixeln (Touch-/Stift-freundlich)
 const ORTHO_TOL = 6;       // Grad: Fanghilfe beim Zeichnen
@@ -44,6 +44,7 @@ function migrate(d) {
   }
   if (!Array.isArray(d.dims)) d.dims = [];
   if (!Array.isArray(d.openings)) d.openings = [];
+  for (const k of ['items', 'rooms', 'texts']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings.lastW = Object.assign({ door: 80, door2: 150, slide: 100, pass: 90, window: 100 }, d.settings.lastW);
   return d;
 }
@@ -389,7 +390,8 @@ function endChain() { chain = null; if (!isMouse) cursor = null; refresh(); }
 function deleteSelection() {
   if (!sel) return;
   const before = snapshot();
-  if (sel.type === 'opening') doc.openings = doc.openings.filter(o => o.id !== sel.id);
+  if (sel.type === 'item' || sel.type === 'room' || sel.type === 'text') { const k = sel.type + 's'; doc[k] = doc[k].filter(o => o.id !== sel.id); }
+  else if (sel.type === 'opening') doc.openings = doc.openings.filter(o => o.id !== sel.id);
   else if (sel.type === 'dim') doc.dims = doc.dims.filter(d => d.id !== sel.id);
   else if (sel.type === 'wall') { const ids = new Set(sel.ids); doc.walls = doc.walls.filter(w => !ids.has(w.id)); }
   else doc.walls = doc.walls.filter(w => w.a !== sel.id && w.b !== sel.id);
@@ -399,6 +401,12 @@ function deleteSelection() {
 // Ziehen: Ausgangszustand wiederherstellen, verschieben, Bedingungen lösen
 function applyDrag(g, wp) {
   doc = JSON.parse(g.before);
+  if (g.type === 'dragObj') {   // Möbel, Text oder Raumbeschriftung verschieben (Möbel docken an Wände an)
+    const o = byId(doc[g.list], g.id), p = { x: g.ox + wp.x - g.start.x, y: g.oy + wp.y - g.start.y };
+    o.x = p.x; o.y = p.y;
+    if (g.snap) { const sn = wallSnap(o, p); if (sn) { o.x = sn.x; o.y = sn.y; o.rot = sn.rot; } }
+    return;
+  }
   if (g.type === 'dragOpen') {   // Öffnung gleitet entlang der Wand
     const o = doc.openings.find(x => x.id === g.id), f = wallFrame(wallById(o.wall), geometry());
     const s1 = Math.max(f.sa, Math.min(f.sb - o.width, g.s0 + (wp.x - g.start.x) * f.u.x + (wp.y - g.start.y) * f.u.y));
@@ -747,6 +755,176 @@ function drawOpenings(c, s, col, g) {
   }
 }
 
+// ---------- Stufe 6: Einrichtung, Räume, Texte ----------
+const TEXT_SIZES = { s: 25, m: 40, l: 60 };   // Schrifthöhe in cm
+const ROOM_NAMES = ['Wohnzimmer', 'Küche', 'Esszimmer', 'Schlafzimmer', 'Kinderzimmer', 'Bad', 'WC', 'Flur', 'Diele', 'Büro',
+  'Abstellraum', 'Hauswirtschaft', 'Gästezimmer', 'Ankleide', 'Technik', 'Keller', 'Garage', 'Terrasse', 'Balkon'];
+const byId = (list, id) => list.find(x => x.id === id);
+const selItem = () => (sel?.type === 'item' ? byId(doc.items, sel.id) : null);
+const selRoom = () => (sel?.type === 'room' ? byId(doc.rooms, sel.id) : null);
+const selText = () => (sel?.type === 'text' ? byId(doc.texts, sel.id) : null);
+const toLocal = (o, p) => {   // Punkt ins lokale System eines gedrehten Objekts
+  const r = -(o.rot || 0) * Math.PI / 180, dx = p.x - o.x, dy = p.y - o.y;
+  return { x: dx * Math.cos(r) - dy * Math.sin(r), y: dx * Math.sin(r) + dy * Math.cos(r) };
+};
+function hitItem(p) {
+  for (let i = doc.items.length - 1; i >= 0; i--) { const it = doc.items[i], q = toLocal(it, p); if (Math.abs(q.x) <= it.w / 2 && Math.abs(q.y) <= it.d / 2) return it; }
+  return null;
+}
+const textBox = t => ({ w: Math.max(1, t.text.length) * TEXT_SIZES[t.size] * 0.58, h: TEXT_SIZES[t.size] });
+function hitText(p) {
+  for (let i = doc.texts.length - 1; i >= 0; i--) { const t = doc.texts[i], q = toLocal(t, p), b = textBox(t); if (Math.abs(q.x) <= b.w / 2 + 5 && Math.abs(q.y) <= b.h / 2 + 5) return t; }
+  return null;
+}
+function hitRoom(sp) { for (const r of doc.rooms) { const p = toScreen(r); if (Math.abs(sp.x - p.x) < 50 && Math.abs(sp.y - p.y) < 20) return r; } return null; }
+
+// An Wand andocken: Rückseite an die nächste Wandfläche, Ausrichtung parallel
+function wallSnap(it, p) {
+  const g = geometry(), tol = Math.max(15, 25 / view.s);
+  let best = null;
+  for (const w of doc.walls) {
+    const poly = g.polys.get(w.id), u = unit(nodeById(w.a), nodeById(w.b)); if (!poly || !u) continue;
+    const nl = { x: -u.y, y: u.x };
+    for (const [s0, s1, n] of [[poly[0], poly[1], nl], [poly[3], poly[2], { x: -nl.x, y: -nl.y }]]) {
+      const dd = (p.x - s0.x) * n.x + (p.y - s0.y) * n.y;
+      if (dd < -5 || Math.abs(dd - it.d / 2) > tol) continue;
+      const t = (p.x - s0.x) * u.x + (p.y - s0.y) * u.y, L = (s1.x - s0.x) * u.x + (s1.y - s0.y) * u.y;
+      if (t < Math.min(0, L) || t > Math.max(0, L)) continue;
+      const score = Math.abs(dd - it.d / 2);
+      if (!best || score < best.score) best = { score, x: p.x - n.x * (dd - it.d / 2), y: p.y - n.y * (dd - it.d / 2), rot: Math.round(Math.atan2(-n.x, n.y) * 180 / Math.PI * 100) / 100 };
+    }
+  }
+  return best;
+}
+function placeItem(key, wp) {
+  const sym = SYMBOLS[key]; if (!sym) return;
+  const before = snapshot();
+  const it = { id: uid(), sym: key, x: wp.x, y: wp.y, rot: 0, w: sym.w, d: sym.d };
+  const sn = wallSnap(it, wp); if (sn) Object.assign(it, { x: sn.x, y: sn.y, rot: sn.rot });
+  doc.items.push(it); sel = { type: 'item', id: it.id }; tool = 'select'; commit(before);
+}
+function applyItem(wM, dM, rot) {
+  const it = selItem(); if (!it) return;
+  const before = snapshot();
+  if (wM > 0) it.w = Math.round(wM * 1000) / 10;
+  if (dM > 0) it.d = Math.round(dM * 1000) / 10;
+  if (Number.isFinite(rot)) it.rot = ((rot % 360) + 360) % 360;
+  commit(before);
+}
+function rotateSel(deg) {
+  const it = selItem(), tx = selText(); if (!it && !tx) return;
+  const before = snapshot(), o = it || tx; o.rot = (((o.rot || 0) + deg) % 360 + 360) % 360; commit(before);
+}
+function duplicateSel() {
+  const it = selItem(); if (!it) return;
+  const before = snapshot(), c = { ...it, id: uid(), x: it.x + 30, y: it.y + 30 };
+  doc.items.push(c); sel = { type: 'item', id: c.id }; commit(before);
+}
+function setObj(o, key, val) { if (!o || o[key] === val) return; const before = snapshot(); o[key] = val; commit(before); }
+function addText(wp) {
+  const before = snapshot(), t = { id: uid(), x: wp.x, y: wp.y, text: 'Text', size: 'm', rot: 0 };
+  doc.texts.push(t); sel = { type: 'text', id: t.id }; tool = 'select'; commit(before);
+  const i = $('#tIn'); if (i) { i.focus(); i.select(); }
+}
+
+// Räume: Flächen des Wandnetzes (Halbkanten-Umlauf); beschränkte Flächen haben positive Fläche
+function planarFaces() {
+  const N = new Map(doc.nodes.map(n => [n.id, n])), out = new Map(doc.nodes.map(n => [n.id, []]));
+  for (const w of doc.walls) {
+    const a = N.get(w.a), b = N.get(w.b);
+    out.get(w.a).push({ to: w.b, w, ang: Math.atan2(b.y - a.y, b.x - a.x) });
+    out.get(w.b).push({ to: w.a, w, ang: Math.atan2(a.y - b.y, a.x - b.x) });
+  }
+  for (const l of out.values()) l.sort((p, q) => p.ang - q.ang);
+  const used = new Set(), faces = [];
+  for (const [u0, list] of out) for (const e0 of list) {
+    if (used.has(u0 + '>' + e0.w.id)) continue;
+    const cyc = []; let u = u0, e = e0;
+    for (let guard = 0; guard < 5000; guard++) {
+      const k = u + '>' + e.w.id; if (used.has(k)) break;
+      used.add(k); cyc.push({ from: u, to: e.to, w: e.w });
+      const l = out.get(e.to), i = l.findIndex(x => x.to === u && x.w === e.w);
+      u = e.to; e = l[(i - 1 + l.length) % l.length];
+    }
+    const pts = cyc.map(c => N.get(c.from));
+    let A = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; A += p.x * q.y - q.x * p.y; }
+    faces.push({ cyc, pts, area: A / 2 });
+  }
+  return faces;
+}
+function faceAt(p, faces) {
+  let best = null;
+  for (const f of faces) if (f.area > 1 && inPoly(p, f.pts) && (!best || f.area < best.area)) best = f;
+  return best;
+}
+// Innenumriss eines Raums: jede Kante um die Wandfläche zur Raumseite versetzt
+function roomPolygon(face) {
+  const N = new Map(doc.nodes.map(n => [n.id, n]));
+  const L = face.cyc.map(e => {
+    const a = N.get(e.from), b = N.get(e.to), u = unit(a, b) || { x: 1, y: 0 }, nl = { x: -u.y, y: u.x };
+    const [ol, or] = wallOffsets(e.w), off = e.w.a === e.from ? ol : or;
+    return { p: { x: a.x + nl.x * off, y: a.y + nl.y * off }, d: u, end: { x: b.x + nl.x * off, y: b.y + nl.y * off }, t: e.w.thick };
+  });
+  const pts = [];
+  for (let i = 0; i < L.length; i++) {
+    const A = L[i], B = L[(i + 1) % L.length], X = lineX(A.p, A.d, B.p, B.d);
+    if (X && dist(X, A.end) < 4 * Math.max(A.t, B.t) + 1) pts.push(X);
+    else { pts.push(A.end); if (dist(A.end, B.p) > 0.1) pts.push(B.p); }
+  }
+  return pts;
+}
+const polyArea = pts => { let A = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; A += p.x * q.y - q.x * p.y; } return Math.abs(A / 2); };
+const fmtArea = cm2 => (cm2 / 10000).toFixed(2).replace('.', ',') + ' m²';
+function roomInfo(r, faces) { const f = faceAt(r, faces); if (!f) return null; const poly = roomPolygon(f); return { face: f, poly, area: polyArea(poly) }; }
+function addRoom(wp) {
+  const faces = planarFaces(), f = faceAt(wp, faces);
+  if (!f) {
+    const deg = new Map(); for (const w of doc.walls) { deg.set(w.a, (deg.get(w.a) || 0) + 1); deg.set(w.b, (deg.get(w.b) || 0) + 1); }
+    conflict = new Set(doc.walls.filter(w => deg.get(w.a) === 1 || deg.get(w.b) === 1).map(w => w.id));
+    toast('Raum ist nicht geschlossen – offene Wandenden sind rot markiert'); refresh(); return;
+  }
+  const ex = doc.rooms.find(r => faceAt(r, faces) === f);
+  if (ex) { sel = { type: 'room', id: ex.id }; tool = 'select'; refresh(); return; }
+  const before = snapshot(), r = { id: uid(), x: wp.x, y: wp.y, name: 'Raum' };
+  doc.rooms.push(r); sel = { type: 'room', id: r.id }; tool = 'select'; conflict = new Set(); commit(before);
+  const i = $('#rIn'); if (i) { i.focus(); i.select(); }
+}
+function drawItemsAndTexts(c, s, stroke, fill) {
+  for (const it of doc.items) {
+    c.save(); c.translate(it.x, it.y); c.rotate((it.rot || 0) * Math.PI / 180);
+    drawSymbol(c, it.sym, it.w, it.d, 1.3 / s, stroke, fill);
+    c.restore();
+  }
+  for (const t of doc.texts) {
+    c.save(); c.translate(t.x, t.y); c.rotate((t.rot || 0) * Math.PI / 180);
+    c.fillStyle = stroke; c.font = `600 ${TEXT_SIZES[t.size]}px -apple-system, "Segoe UI", sans-serif`;
+    c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(t.text, 0, 0);
+    c.restore();
+  }
+}
+function itemFill() {
+  const s = settings(); if (s.transparent) return null;
+  return wallColor() === '#222222' ? '#f1f1f1' : '#2a2f3a';
+}
+// Bibliotheksfenster mit Vorschaubildern
+function buildLibrary() {
+  const body = $('#libBody'); if (body.childElementCount) return;
+  const cats = {};
+  for (const [k, s] of Object.entries(SYMBOLS)) (cats[s.cat] ||= []).push(k);
+  for (const [cat, keys] of Object.entries(cats)) {
+    const h = document.createElement('h4'); h.textContent = cat; body.appendChild(h);
+    const grid = document.createElement('div'); grid.className = 'libgrid'; body.appendChild(grid);
+    for (const k of keys) {
+      const s = SYMBOLS[k], b = document.createElement('button'), cv2 = document.createElement('canvas');
+      b.dataset.sym = k; b.title = `${s.name} (${fmtNum(s.w)} × ${fmtNum(s.d)} cm)`;
+      cv2.width = 128; cv2.height = 128; const g = cv2.getContext('2d'), k2 = 108 / Math.max(s.w, s.d);
+      g.setTransform(k2, 0, 0, k2, 64, 64); drawSymbol(g, k, s.w, s.d, 2.2 / k2, '#374151', '#f3f4f6');
+      const sp = document.createElement('span'); sp.textContent = s.name;
+      b.append(cv2, sp); grid.appendChild(b);
+    }
+  }
+}
+
 // Wandflächen mit sauberen Ecken (Gehrung) und Knotenflächen
 function geometry() {
   const N = new Map(doc.nodes.map(n => [n.id, n]));
@@ -817,7 +995,7 @@ function draw() {
     if (settings().transparent) drawChecker(); else { ctx.fillStyle = settings().bg; ctx.fillRect(0, 0, W, H); }
   } else drawGrid();
   ctx.setTransform(DPR * view.s, 0, 0, DPR * view.s, DPR * view.ox, DPR * view.oy);
-  drawPlan(ctx, ({ 7: 'final', 5: 'open', 4: 'measure', 3: 'thick', 2: 'angles' })[stage] || 'sketch', view.s);
+  drawPlan(ctx, ({ 7: 'final', 6: 'furnish', 5: 'open', 4: 'measure', 3: 'thick', 2: 'angles' })[stage] || 'sketch', view.s);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (stage !== 7) drawOverlay();
 }
@@ -861,9 +1039,10 @@ function drawPlan(c, mode, s) {
       for (const pc of wallPieces(w, p, g)) { polyPath(c, pc); c.fill(); c.stroke(); }
     }
     drawOpenings(c, s, col, g);
+    drawItemsAndTexts(c, s, col, itemFill());
     return;
   }
-  const base = mode === 'sketch' ? '#e7e5e0' : mode === 'measure' ? '#b8bcc4' : mode === 'open' ? '#a3a8b1' : '#d1d5db';
+  const base = mode === 'sketch' ? '#e7e5e0' : mode === 'measure' ? '#b8bcc4' : mode === 'open' || mode === 'furnish' ? '#a3a8b1' : '#d1d5db';
   c.fillStyle = mode === 'thick' ? '#6b7280' : base;
   for (const h of g.hubs) { polyPath(c, h); c.fill(); }
   for (const w of doc.walls) {
@@ -872,7 +1051,8 @@ function drawPlan(c, mode, s) {
     for (const pc of wallPieces(w, p, g)) { polyPath(c, pc); c.fill(); }
   }
   if (doc.openings.length) drawOpenings(c, s, '#374151', g);
-  if (mode === 'thick' || mode === 'measure' || mode === 'open') return;
+  if (mode === 'furnish') drawItemsAndTexts(c, s, '#374151', '#ffffff');
+  if (mode === 'thick' || mode === 'measure' || mode === 'open' || mode === 'furnish') return;
   c.lineCap = 'round'; c.lineWidth = 2.5 / s;
   for (const w of doc.walls) {
     const a = nodeById(w.a), b = nodeById(w.b);
@@ -889,6 +1069,30 @@ function label(text, x, y, color, small) {
 }
 function drawOverlay() {
   const g = stage >= 3 ? geometry() : null;
+  // Stufe 6: Räume (Name + Fläche), gewählte Objekte
+  if (stage === 6) {
+    const faces = planarFaces(), sr = selRoom();
+    for (const r of doc.rooms) {
+      const info = roomInfo(r, faces), p = toScreen(r);
+      if (info && r === sr) { ctx.fillStyle = 'rgba(37,99,235,.12)'; polyPath(ctx, info.poly.map(toScreen)); ctx.fill(); }
+      const col = r === sr ? '#1d4ed8' : '#111827';
+      ctx.font = '700 14px -apple-system, "Segoe UI", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      const t2 = info ? fmtArea(info.area) : 'nicht geschlossen', w = Math.max(ctx.measureText(r.name).width, 90) + 12;
+      ctx.fillRect(p.x - w / 2, p.y - 18, w, 36);
+      ctx.fillStyle = col; ctx.fillText(r.name, p.x, p.y - 7);
+      ctx.font = '500 12px -apple-system, "Segoe UI", sans-serif'; ctx.fillStyle = info ? '#4b5563' : '#dc2626'; ctx.fillText(t2, p.x, p.y + 9);
+    }
+    const o = selItem() || selText();
+    if (o) {
+      const b = selItem() ? { w: o.w, h: o.d } : textBox(o), r = (o.rot || 0) * Math.PI / 180;
+      const pts = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+        const x = sx * b.w / 2 + sx * 4, y = sy * b.h / 2 + sy * 4;
+        return toScreen({ x: o.x + x * Math.cos(r) - y * Math.sin(r), y: o.y + x * Math.sin(r) + y * Math.cos(r) });
+      });
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; polyPath(ctx, pts); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
   // Gewählte Öffnung (Stufe 5): Umriss und Abstände zu den Ecken
   const so = stage === 5 && selOpening();
   if (so) {
@@ -1030,7 +1234,7 @@ const evPos = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX
 function startPan(sp) { gesture = { type: 'pan', sp, ox0: view.ox, oy0: view.oy }; cv.classList.add('grabbing'); }
 function abortGesture() {
   const g = gesture;
-  if (g && (g.type === 'dragNode' || g.type === 'dragWall' || g.type === 'dragOpen') && g.moved) doc = JSON.parse(g.before);
+  if (g && ['dragNode', 'dragWall', 'dragOpen', 'dragObj'].includes(g.type) && g.moved) doc = JSON.parse(g.before);
   gesture = null; cv.classList.remove('grabbing');
 }
 function startPinch() {
@@ -1067,6 +1271,18 @@ cv.addEventListener('pointerdown', e => {
     const ex = doc.dims.find(d => d.kind === 'dist' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
     sel = ex ? { type: 'dim', id: ex.id, w1: ex.w1, w2: ex.w2 } : { type: 'dim', id: null, w1: w1.id, w2: w.id };
     refresh(); return;
+  }
+  if (stage === 6) {
+    if (t.startsWith('place:')) { placeItem(t.slice(6), wp); return; }
+    if (t === 'room') { addRoom(wp); return; }
+    if (t === 'text') { addText(wp); return; }
+    const tx = hitText(wp), it = !tx && hitItem(wp), rm = !tx && !it && hitRoom(sp), o = tx || it || rm;
+    if (o) {
+      sel = { type: tx ? 'text' : it ? 'item' : 'room', id: o.id };
+      gesture = { type: 'dragObj', list: tx ? 'texts' : it ? 'items' : 'rooms', id: o.id, before: snapshot(), start: wp, sp, ox: o.x, oy: o.y, snap: !!it && !e.altKey, moved: false };
+      refresh(); return;
+    }
+    sel = null; startPan(sp); refresh(); return;
   }
   if (stage === 5) {
     const o = hitOpening(wp, tol);
@@ -1165,7 +1381,7 @@ function onUp(e) {
   } else if (g.type === 'dragNode' && g.moved) {
     if (g.mergeTo) { mergeNodes(g.id, g.mergeTo); sel = { type: 'node', id: g.mergeTo }; }
     commit(g.before);
-  } else if ((g.type === 'dragWall' || g.type === 'dragOpen') && g.moved) commit(g.before);
+  } else if ((g.type === 'dragWall' || g.type === 'dragOpen' || g.type === 'dragObj') && g.moved) commit(g.before);
   refresh();
 }
 cv.addEventListener('pointerup', onUp);
@@ -1191,12 +1407,14 @@ document.addEventListener('keydown', e => {
   if (e.target.closest?.('input, select, textarea') && !(mod && (k === 'z' || k === 'y'))) return;
   if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && k === 'y') { e.preventDefault(); redo(); return; }
+  if (mod && k === 'd' && stage === 6) { e.preventDefault(); duplicateSel(); return; }
   if (mod && k === 'a' && stage === 3) { e.preventDefault(); sel = doc.walls.length ? { type: 'wall', ids: doc.walls.map(w => w.id) } : null; refresh(); return; }
   if (mod) return;
   if (k === ' ') { spaceDown = true; cv.classList.add('pan'); e.preventDefault(); }
   else if (k === 'escape') { if (chain) endChain(); else { sel = null; refresh(); } }
   else if (k === 'enter') endChain();
   else if ((k === 'delete' || k === 'backspace') && stage !== 7) { e.preventDefault(); deleteSelection(); }
+  else if (k === 'r' && stage === 6) rotateSel(e.shiftKey ? -90 : 90);
   else if (k === 'w' && stage === 1) setTool('wall');
   else if (k === 'n' && stage === 1) setTool('origin');
   else if (k === 'v' && stage !== 7) setTool('select');
@@ -1211,7 +1429,9 @@ function setStage(s) {
   stage = s; chain = null; cursor = null; cornerSwap = false; dimPick = null; conflict = new Set();
   if (s === 7 || s === 4 || sel?.type === 'dim' || (s === 3 && sel?.type === 'node')) sel = null;
   if (s !== 1 && (tool === 'wall' || tool === 'origin')) tool = 'select';
-  if ((s !== 4 && tool === 'dim') || (s !== 2 && tool === 'flucht') || (s !== 5 && OTYPES[tool])) tool = 'select';
+  if ((s !== 4 && tool === 'dim') || (s !== 2 && tool === 'flucht') || (s !== 5 && OTYPES[tool])
+    || (s !== 6 && (tool.startsWith('place:') || tool === 'room' || tool === 'text'))) tool = 'select';
+  if (s !== 6) { $('#lib').hidden = true; if (['item', 'room', 'text'].includes(sel?.type)) sel = null; }
   if (sel?.type === 'opening' && s !== 5) sel = null;
   if (s === 1 && tool === 'pan') tool = 'wall';
   refresh();
@@ -1235,6 +1455,12 @@ function hintText() {
   if (t === 'flucht' || t === 'dim') return dimPick ? 'Zweite, parallele Wand anklicken'
     : t === 'flucht' ? 'Flucht: erste Wand anklicken (bleibt stehen), dann die Wand, die auf deren Linie soll'
       : 'Abstand: zwei parallele Wände anklicken, dann lichtes Maß in Metern eingeben';
+  if (stage === 6) {
+    if (t.startsWith('place:')) return `${SYMBOLS[t.slice(6)].name}: in den Plan klicken – nahe einer Wand dockt es automatisch an`;
+    if (t === 'room') return 'In einen geschlossenen Raum klicken, dann Namen wählen (Fläche wird berechnet)';
+    if (t === 'text') return 'Klicken, wo der Text stehen soll';
+    return 'Objekt anklicken = bearbeiten · ziehen = verschieben (Alt = ohne Andocken) · R = drehen · Strg+D = duplizieren · Entf = löschen';
+  }
   if (stage === 5) return OTYPES[t] ? `${OTYPES[t]}: auf eine Wand klicken zum Einsetzen · vorhandene Öffnung anklicken/ziehen = bearbeiten/verschieben`
     : 'Typ links wählen und auf eine Wand klicken · Öffnung anklicken = bearbeiten, ziehen = verschieben, Entf = löschen';
   if (stage === 4) return 'Wand anklicken → Innenmaß in Metern eingeben (Enter) · grün = gemessen, grau = gezeichnet';
@@ -1277,6 +1503,27 @@ function renderProps() {
       : `<span class="info">Winkel nur an Ecken mit genau zwei Wänden einstellbar</span>`;
     if (doc.dims.some(d => d.kind === 'nalign' && (d.n1 === sel.id || d.n2 === sel.id))) p.innerHTML += '<button data-act="nFree">Ecken-Ausrichtung lösen</button>';
     p.innerHTML += '<span class="info">Strg+Klick = weitere Ecken markieren</span>';
+  } else if (stage === 6 && selItem()) {
+    const it = selItem();
+    p.innerHTML = `<span class="info"><b>${SYMBOLS[it.sym]?.name || 'Objekt'}</b> · Breite</span><input id="iW" inputmode="decimal" value="${fmtM(it.w)}">
+      <span class="info">Tiefe</span><input id="iD" inputmode="decimal" value="${fmtM(it.d)}"><span class="info">m · Drehung</span>
+      <input id="iR" inputmode="decimal" value="${fmtNum(it.rot || 0)}"><span class="info">°</span><button class="primary" data-act="iSet">Übernehmen</button>
+      <span class="sep"></span><button data-act="rotL">⟲ 90°</button><button data-act="rotR">⟳ 90°</button>
+      <button data-act="dup">Duplizieren</button><button class="danger" data-act="del">Löschen</button>`;
+  } else if (stage === 6 && selRoom()) {
+    const r = selRoom(), info = roomInfo(r, planarFaces());
+    p.innerHTML = `<span class="info">Raum</span><input id="rIn" list="roomNames" style="width:180px" value="${r.name.replace(/"/g, '&quot;')}">
+      <datalist id="roomNames">${ROOM_NAMES.map(n => `<option value="${n}">`).join('')}</datalist>
+      <button class="primary" data-act="rSet">Übernehmen</button>
+      <span class="info">Fläche <b>${info ? fmtArea(info.area) : '– (nicht geschlossen)'}</b></span><button class="danger" data-act="del">Löschen</button>`;
+  } else if (stage === 6 && selText()) {
+    const t = selText();
+    p.innerHTML = `<span class="info">Text</span><input id="tIn" style="width:200px" value="${t.text.replace(/"/g, '&quot;')}">
+      <button class="primary" data-act="tSet">Übernehmen</button><span class="sep"></span>
+      ${Object.keys(TEXT_SIZES).map(k => `<button data-act="tSize" data-val="${k}" class="${t.size === k ? 'on' : ''}">${k.toUpperCase()}</button>`).join('')}
+      <button data-act="rotR">Drehen 90°</button><button class="danger" data-act="del">Löschen</button>`;
+  } else if (stage === 6) {
+    p.innerHTML = `<span class="info">${doc.items.length} Objekte · ${doc.rooms.length} Räume · ${doc.texts.length} Texte</span>`;
   } else if (stage === 5 && selOpening()) {
     const o = selOpening(), isDoor = o.type === 'door' || o.type === 'door2';
     p.innerHTML = `<select id="oType">${Object.entries(OTYPES).map(([k, v]) => `<option value="${k}"${k === o.type ? ' selected' : ''}>${v}</option>`).join('')}</select>
@@ -1357,6 +1604,13 @@ $('#props').addEventListener('click', e => {
   else if (a === 'outer') detectOuter();
   else if (a === 'nAlignH' || a === 'nAlignV') alignNodes(sel.ids.slice(), a === 'nAlignH' ? 'h' : 'v');
   else if (a === 'nFree') { const id = sel.id, before = snapshot(); doc.dims = doc.dims.filter(d => !(d.kind === 'nalign' && (d.n1 === id || d.n2 === id))); commit(before); }
+  else if (a === 'iSet') applyItem(parseNum($('#iW').value), parseNum($('#iD').value), parseNum($('#iR').value));
+  else if (a === 'rotL') rotateSel(-90);
+  else if (a === 'rotR') rotateSel(90);
+  else if (a === 'dup') duplicateSel();
+  else if (a === 'rSet') setObj(selRoom(), 'name', $('#rIn').value.trim() || 'Raum');
+  else if (a === 'tSet') setObj(selText(), 'text', $('#tIn').value || 'Text');
+  else if (a === 'tSize') setObj(selText(), 'size', b.dataset.val);
   else if (a === 'oSet') applyOpening(parseNum($('#oW').value), parseNum($('#oOff').value));
   else if (a === 'oRef') changeOpening((o, f) => { const s1 = openingSpan(o, f).s1; o.ref = o.ref === 'a' ? 'b' : 'a'; setSpan(o, f, s1); });
   else if (a === 'oHinge') changeOpening(o => { o.hinge = o.hinge === 'end' ? 'start' : 'end'; });
@@ -1379,11 +1633,22 @@ $('#props').addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   if (e.target.id === 'mIn') (sel?.type === 'dim' ? applyDim : applyMass)(parseNum(e.target.value));
   if (e.target.id === 'oW' || e.target.id === 'oOff') applyOpening(parseNum($('#oW').value), parseNum($('#oOff').value));
+  if (['iW', 'iD', 'iR'].includes(e.target.id)) applyItem(parseNum($('#iW').value), parseNum($('#iD').value), parseNum($('#iR').value));
+  if (e.target.id === 'tIn') setObj(selText(), 'text', e.target.value || 'Text');
+  if (e.target.id === 'rIn') setObj(selRoom(), 'name', e.target.value.trim() || 'Raum');
   if (e.target.id === 'angIn') setCornerAngle(sel.id, parseNum(e.target.value));
   if (e.target.id === 'thIn') setThick(parseNum(e.target.value));
 });
+// Möbel-Bibliothek
+$('#libBtn').addEventListener('click', () => { buildLibrary(); $('#lib').hidden = !$('#lib').hidden; });
+$('#libClose').addEventListener('click', () => { $('#lib').hidden = true; });
+$('#libBody').addEventListener('click', e => {
+  const b = e.target.closest('[data-sym]'); if (!b) return;
+  tool = 'place:' + b.dataset.sym; sel = null; $('#lib').hidden = true; refresh();
+});
 $('#props').addEventListener('change', e => {
   if (e.target.id === 'oType') changeOpening(o => { o.type = e.target.value; });
+  if (e.target.id === 'rIn') setObj(selRoom(), 'name', e.target.value.trim() || 'Raum');
 });
 document.querySelectorAll('.stage').forEach(b => b.addEventListener('click', () => setStage(+b.dataset.stage)));
 document.querySelectorAll('.tool').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
@@ -1445,6 +1710,10 @@ const EXPORT_WIDTH = 2000, EXPORT_MARGIN = 50;
 function exportImage({ width = EXPORT_WIDTH, margin = EXPORT_MARGIN } = {}) {
   const b = bbox(); if (!b) return Promise.reject(new Error('leer'));
   const swing = Math.max(0, ...doc.openings.filter(o => o.type === 'door' || o.type === 'door2').map(o => o.width));   // Türaufschlag nach außen
+  for (const o of [...doc.items, ...doc.texts]) {   // Möbel und Texte außerhalb der Wände mit einschließen
+    const r = Math.hypot(o.w ?? textBox(o).w, o.d ?? textBox(o).h) / 2;
+    b.x0 = Math.min(b.x0, o.x - r); b.y0 = Math.min(b.y0, o.y - r); b.x1 = Math.max(b.x1, o.x + r); b.y1 = Math.max(b.y1, o.y + r);
+  }
   const pad = Math.max(0, ...doc.walls.map(w => w.thick)) + margin + swing;
   const x0 = b.x0 - pad, y0 = b.y0 - pad, bw = b.x1 - b.x0 + 2 * pad, bh = b.y1 - b.y0 + 2 * pad;
   let w = Math.max(200, Math.min(8000, Math.round(width))), h = Math.round(bh * w / bw);

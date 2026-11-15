@@ -140,3 +140,8 @@ Die linke Werkzeugleiste und die Eigenschaftsleiste wechseln je Stufe ihren Inha
 - Wand wird an Öffnungen geometrisch aufgeteilt (funktioniert auch mit transparentem Hintergrund)
 - Abstand der Öffnung = Innenmaß von der Wandfläche der Bezugsecke
 - Zusätzlich: Ecken waagerecht/senkrecht auf eine Linie (Stufe 2)
+
+### v0.5 (2026-11-15)
+- Symbolliste inkl. Auto, Klavier, Sauna, Heizung/Technik; Möbel docken beim Ziehen automatisch an Wände an
+- Texte erscheinen im PNG; Raumnamen/Flächen nur beim Zeichnen
+- Raumerkennung exakt aus dem Wandnetz (Flächen-Umlauf, um Wanddicken nach innen versetzt)

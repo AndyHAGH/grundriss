@@ -3,7 +3,7 @@
 Einfaches 2D-CAD im Browser, um Grundrisse von bestehenden Gebäuden zu zeichnen und als PNG für
 Home Assistant zu exportieren. Konzept: [KONZEPT.md](KONZEPT.md)
 
-**Version 0.4.1.** Zielgerät ist vorerst ein Windows-PC (Chrome/Edge). Die Bedienung über Pointer-Events ist
+**Version 0.5.0.** Zielgerät ist vorerst ein Windows-PC (Chrome/Edge). Die Bedienung über Pointer-Events ist
 für iPad und Apple Pencil vorbereitet.
 
 ## Starten
@@ -20,6 +20,7 @@ für iPad und Apple Pencil vorbereitet.
 | 2 Winkel – Ecken | Ecken mit Strg+Klick markieren (die zuerst markierte bleibt stehen), dann „Waagerecht auf eine Linie“ (gleiche Höhe) oder „Senkrecht auf eine Linie“. Bleibt erhalten (türkis gestrichelt); an einer markierten Ecke „Ecken-Ausrichtung lösen“. |
 | 4 Maße | Wand anklicken und das **Innenmaß in Metern** eintippen (z. B. `4,12`), Enter übernimmt. Bei Außenwänden ist die Innenseite vorgewählt, bei Innenwänden die angeklickte Seite; „Andere Seite“ wechselt sie. Das schwarze Quadrat („fest“) markiert das Ende, das stehen bleibt; „Anderes Ende fest“ tauscht es. Werkzeug **„Abstand“** (oder Wand anklicken + Strg+Klick auf die zweite): zwei parallele Wände wählen und den lichten Abstand eingeben. Grün = gemessen, grau = gezeichnet. Ein Maß, das den vorhandenen widerspricht, wird nicht übernommen, die beteiligten Wände werden rot markiert. Innenmaße bleiben auch bei geänderter Wanddicke erhalten. |
 | 5 Fenster/Türen | Typ links wählen (Tür, Doppeltür, Schiebetür, Durchgang, Fenster) und auf eine Wand klicken. Unten Breite und Abstand zur grün markierten Ecke in Metern eingeben (Innenmaß ab Wandfläche); „Andere Ecke“ wechselt den Bezug. Öffnung anklicken = bearbeiten, ziehen = entlang der Wand verschieben, Entf = löschen. Türen: „Anschlag wechseln“, „Öffnet zur anderen Seite“. Öffnungen behalten ihren Abstand zur Bezugsecke, auch wenn sich Maße ändern. |
+| 6 Einrichtung | **Möbel:** links „Möbel“ öffnet die Bibliothek (Wohnen, Essen, Schlafen, Küche, Bad, Sonstiges inkl. Auto, Klavier, Sauna, Technik). Symbol wählen, in den Plan klicken. Nahe einer Wand dockt es automatisch an (Rückseite an die Wand, parallel ausgerichtet); Alt beim Ziehen = ohne Andocken. Breite/Tiefe in m und Drehung unten einstellbar, R = 90° drehen, Strg+D = duplizieren. **Raum:** in einen geschlossenen Raum klicken, Namen wählen; die Fläche (m²) wird exakt aus den Innenflächen berechnet und nur beim Zeichnen angezeigt. **Text:** klicken, Text eingeben, Größe S/M/L, drehen. Texte und Möbel erscheinen im PNG. |
 | 7 Vorschau | Ansicht ohne Hilfslinien, Export als PNG |
 
 **Gerade Wände:** Wird eine Wand an eine durchgehende Wand angedockt, bleibt diese beim Ziehen gerade. Der Anschlusspunkt gleitet entlang der Wand.
@@ -34,6 +35,7 @@ für iPad und Apple Pencil vorbereitet.
 PNG, 2000 px breit, die Höhe ergibt sich aus dem Plan. Rand 50 cm, Hintergrund laut Einstellung.
 
 ## Versionen
+- 0.5.0: Stufe 6 Einrichtung – Möbelbibliothek (35 Symbole) mit Wand-Andocken, Räume mit automatischer Fläche, Texte
 - 0.4.1: Stufe 4 – Wand anklicken + Strg+Klick auf zweite Wand = Abstand eingeben
 - 0.4.0: Stufe 5 Fenster/Türen (Tür, Doppeltür, Schiebetür, Durchgang, Fenster; Wand wird an Türen unterbrochen, Fenster als Symbol in der Wand); Stufe 2 – Ecken waagerecht/senkrecht auf eine Linie
 - 0.3.1: Stufe 2 – mehrere Wände per Strg+Klick auf eine Linie ausrichten, Versprünge werden entfernt; Fehler behoben, durch den weit entfernte Wände beim Fluchten seitlich verrutschten

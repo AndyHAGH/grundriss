@@ -19,7 +19,7 @@
     <button class="stage" data-stage="3">3 Dicke</button>
     <button class="stage" data-stage="4">4 Maße</button>
     <button class="stage" data-stage="5">5 Fenster/Türen</button>
-    <button class="stage" data-stage="6" disabled title="folgt in v0.5">6 Einrichtung</button>
+    <button class="stage" data-stage="6">6 Einrichtung</button>
     <button class="stage" data-stage="7">7 Vorschau</button>
   </div>
   <div id="actions">
@@ -32,17 +32,20 @@
 <main>
   <nav id="tools">
     <button class="tool" data-tool="wall" data-stages="1" title="Wand zeichnen (W)"><b>✎</b><span>Wand</span></button>
-    <button class="tool" data-tool="select" data-stages="1,2,3,4,5" title="Auswählen (V)"><b>⬚</b><span>Auswahl</span></button>
+    <button class="tool" data-tool="select" data-stages="1,2,3,4,5,6" title="Auswählen (V)"><b>⬚</b><span>Auswahl</span></button>
     <button class="tool" data-tool="door" data-stages="5" title="Tür einsetzen"><b>◜</b><span>Tür</span></button>
     <button class="tool" data-tool="door2" data-stages="5" title="Doppeltür einsetzen"><b>◜◝</b><span>Doppeltür</span></button>
     <button class="tool" data-tool="slide" data-stages="5" title="Schiebetür einsetzen"><b>⇄</b><span>Schiebetür</span></button>
     <button class="tool" data-tool="pass" data-stages="5" title="Durchgang (Öffnung ohne Tür)"><b>⊓</b><span>Durchgang</span></button>
     <button class="tool" data-tool="window" data-stages="5" title="Fenster einsetzen"><b>▭</b><span>Fenster</span></button>
+    <button id="libBtn" data-stages="6" title="Möbel-Bibliothek öffnen"><b>🛋</b><span>Möbel</span></button>
+    <button class="tool" data-tool="room" data-stages="6" title="Raum benennen (Fläche wird berechnet)"><b>▢</b><span>Raum</span></button>
+    <button class="tool" data-tool="text" data-stages="6" title="Text setzen"><b>T</b><span>Text</span></button>
     <button class="tool" data-tool="origin" data-stages="1" title="Nullpunkt setzen (N)"><b>⊕</b><span>Nullpunkt</span></button>
     <button class="tool" data-tool="flucht" data-stages="2" title="Zwei Wände auf eine Linie bringen"><b>═</b><span>Flucht</span></button>
     <button class="tool" data-tool="dim" data-stages="4" title="Abstand zwischen zwei parallelen Wänden"><b>↔</b><span>Abstand</span></button>
-    <button class="tool" data-tool="pan" data-stages="1,2,3,4,5,7" title="Ansicht verschieben (H)"><b>✋</b><span>Ansicht</span></button>
-    <button id="fit" data-stages="1,2,3,4,5,7" title="Alles zeigen (F)"><b>⤢</b><span>Alles</span></button>
+    <button class="tool" data-tool="pan" data-stages="1,2,3,4,5,6,7" title="Ansicht verschieben (H)"><b>✋</b><span>Ansicht</span></button>
+    <button id="fit" data-stages="1,2,3,4,5,6,7" title="Alles zeigen (F)"><b>⤢</b><span>Alles</span></button>
     <button id="orthoBtn" class="toggle" data-stages="1" title="Gerade Linien fangen (0°/45°/90°)"><b>∟</b><span>Fangen</span></button>
     <button id="multiBtn" class="toggle" data-stages="3" title="Mehrfachauswahl (sonst Strg+Klick)"><b>⧉</b><span>Mehrfach</span></button>
     <button id="exportBtn2" data-stages="7" title="Bild exportieren"><b>⇩</b><span>Export</span></button>
@@ -51,6 +54,7 @@
     <canvas id="cv"></canvas>
     <div id="hint"></div>
     <div id="toast" hidden></div>
+    <div id="lib" hidden><div class="libhead"><b>Möbel &amp; Objekte</b><button id="libClose" title="Schließen">✕</button></div><div id="libBody"></div></div>
   </div>
 </main>
 
@@ -70,6 +74,7 @@
 
 
 <input type="file" id="fileIn" accept=".json,application/json" hidden>
+<script src="symbols.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
