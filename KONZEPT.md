@@ -130,3 +130,7 @@ Die linke Werkzeugleiste und die Eigenschaftsleiste wechseln je Stufe ihren Inha
 - Wanddicken-Vorlagen 36,5 / 30 / 24 / 17,5 / 11,5 cm; Ausrichten auch auf 45°; Wände vollflächig
 - Durchgehende Wände bleiben bei angedockten Wänden gerade (Anschluss gleitet auf der Wand)
 - Nullpunkt frei setzbar, Koordinatenanzeige relativ dazu
+
+### v0.3 (2026-11-15)
+- Maße als Innenmaß (Lichtmaß), Eingabe immer in Metern, kein automatischer Rundgang, Bemaßung einfach
+- Zusätzlich: Flucht – nicht verbundene Wände auf eine Linie bringen (Stufe 2)

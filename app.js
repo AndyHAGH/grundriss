@@ -1,7 +1,7 @@
 'use strict';
 /* Grundriss – einfaches 2D-CAD für Bestandspläne. Einheiten im Modell: Zentimeter, y zeigt nach unten. */
 (() => {
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const STORE_KEY = 'grundriss.projekt.v1';
 const SNAP_PX = 16;        // Fangradius in Bildschirm-Pixeln (Touch-/Stift-freundlich)
 const ORTHO_TOL = 6;       // Grad: Fanghilfe beim Zeichnen
@@ -25,6 +25,9 @@ let chain = null;                              // {from: snap} – laufender Wan
 let cursor = null;                             // Fang-Ergebnis für Vorschau
 let hover = null;                              // Zeigerposition (Welt) für Koordinatenanzeige
 let gesture = null, spaceDown = false, isMouse = true;
+let meas = { side: 'L', anchor: null };         // Stufe 4: gemessene Seite und festes Wandende
+let dimPick = null;                            // Stufe 4: erste Wand für „Abstand“
+let conflict = new Set();                      // Wände mit widersprüchlichen Maßen (rot)
 const pointers = new Map();
 const undoStack = [], redoStack = [];
 
@@ -37,7 +40,9 @@ function migrate(d) {
     if (w.thick == null) w.thick = 24;
     if (w.dir === undefined) w.dir = null;
     if (w.line === undefined) w.line = null;
+    if (w.mass === undefined) w.mass = null;
   }
+  if (!Array.isArray(d.dims)) d.dims = [];
   return d;
 }
 const settings = () => doc.settings;
@@ -107,6 +112,7 @@ function inPoly(p, pts) {
 }
 const wallLen = w => dist(nodeById(w.a), nodeById(w.b));
 const fmtLen = cm => (cm / 100).toFixed(2).replace('.', ',') + ' m';
+const fmtM = cm => String(Math.round(cm * 10) / 1000).replace('.', ',');   // Eingabefeld: Meter
 // Koordinaten relativ zum Nullpunkt, y positiv nach oben
 const rel = p => ({ x: p.x - settings().origin.x, y: settings().origin.y - p.y });
 
@@ -183,41 +189,115 @@ function hostLine(id, groups, exclude) {
 const lineMembers = w => (w.line == null ? [w] : doc.walls.filter(x => x.line === w.line));
 
 // ---------- Löser für Zwangsbedingungen ----------
-// Bedingungen: fixierte Wandrichtung (dir) und gerade durchgehende Wände. Fixierte Punkte (pinned) bewegen sich nicht.
-function solve(pinned = new Set(), iters = 500) {
+// Bedingungen: fixierte Wandrichtung (dir), gerade durchgehende Wände, Innenmaße (mass) und Abstände (dims).
+// Fixierte Punkte (pinned) bewegen sich nicht. Jede Bedingung: run(apply) → Fehler in cm.
+function faceLen(w, side, g) {   // Länge der Wandfläche auf Seite L/R (Innenmaß)
+  const p = g.polys.get(w.id), a = nodeById(w.a), b = nodeById(w.b), u = unit(a, b);
+  if (!p || !u) return dist(a, b);
+  const [AL, BR, BL, AR] = p, [s, e] = side === 'L' ? [AL, BR] : [AR, BL];
+  return Math.abs((e.x - s.x) * u.x + (e.y - s.y) * u.y);
+}
+function buildConstraints(pinned) {
   const N = new Map(doc.nodes.map(n => [n.id, n]));
-  const groups = lineGroups();
-  const cons = doc.walls.filter(w => w.dir != null).map(w => {
-    const r = w.dir * Math.PI / 180;
-    return { a: N.get(w.a), b: N.get(w.b), nx: -Math.sin(r), ny: Math.cos(r) };
-  });
+  const wt = n => (pinned.has(n.id) ? 0 : 1);
+  const cs = [];
+  for (const w of doc.walls) if (w.dir != null) {
+    const a = N.get(w.a), b = N.get(w.b), r = w.dir * Math.PI / 180, nx = -Math.sin(r), ny = Math.cos(r);
+    cs.push({ ids: [w.id], run(apply) {
+      const e = (b.x - a.x) * nx + (b.y - a.y) * ny, wa = wt(a), wb = wt(b);
+      if (apply && (wa || wb)) { const fa = e * wa / (wa + wb), fb = e * wb / (wa + wb); a.x += nx * fa; a.y += ny * fa; b.x -= nx * fb; b.y -= ny * fb; }
+      return Math.abs(e);
+    } });
+  }
+  for (const [, lg] of lineGroups()) {
+    const A = N.get(lg.ends[0]), B = N.get(lg.ends[1]);
+    cs.push({ ids: lg.walls.map(w => w.id), run(apply) {
+      let err = 0;
+      for (const id of lg.interior) {
+        const p = N.get(id), r = projLine(p, A, B); err = Math.max(err, dist(p, r));
+        if (apply && !pinned.has(id)) { p.x = r.x; p.y = r.y; }
+      }
+      return err;
+    } });
+  }
+  const g = doc.walls.some(w => w.mass) || doc.dims.length ? geometry() : null;
+  for (const w of doc.walls) if (w.mass) {
+    const a = N.get(w.a), b = N.get(w.b), T = w.mass.v + dist(a, b) - faceLen(w, w.mass.side, g);
+    cs.push({ ids: [w.id], run(apply) {
+      const L = dist(a, b); if (!L) return 0;
+      const e = L - T, wa = wt(a), wb = wt(b);
+      if (apply && (wa || wb)) {
+        const ux = (b.x - a.x) / L, uy = (b.y - a.y) / L, fa = e * wa / (wa + wb), fb = e * wb / (wa + wb);
+        a.x += ux * fa; a.y += uy * fa; b.x -= ux * fb; b.y -= uy * fb;
+      }
+      return Math.abs(e);
+    } });
+  }
+  for (const d of doc.dims) if (d.kind === 'line') {   // Flucht: Wand 2 liegt auf der Linie von Wand 1
+    const w1 = wallById(d.w1), w2 = wallById(d.w2); if (!w1 || !w2) continue;
+    const a1 = N.get(w1.a), b1 = N.get(w1.b), a2 = N.get(w2.a), b2 = N.get(w2.b);
+    const W1 = wt(a1) && wt(b1) ? 1 : 0, W2 = wt(a2) && wt(b2) ? 1 : 0;
+    cs.push({ ids: [d.w1, d.w2], run(apply) {
+      let err = 0;
+      for (const p of [a2, b2]) {
+        const r = projLine(p, a1, b1), ex = r.x - p.x, ey = r.y - p.y; err = Math.max(err, Math.hypot(ex, ey));
+        if (apply && (W1 || W2)) {
+          const f2 = W2 / (W1 + W2), f1 = W1 / (W1 + W2) / 2;
+          p.x += ex * f2; p.y += ey * f2;
+          for (const q of [a1, b1]) { q.x -= ex * f1; q.y -= ey * f1; }
+        }
+      }
+      return err;
+    } });
+  }
+  for (const d of doc.dims) if (d.kind !== 'line') {
+    const s = dimSetup(d); if (!s) continue;
+    const { a1, b1, a2, b2, T } = s, W1 = wt(a1) && wt(b1) ? 1 : 0, W2 = wt(a2) && wt(b2) ? 1 : 0;
+    cs.push({ ids: [d.w1, d.w2], run(apply) {
+      const u = unit(a1, b1); if (!u) return 0;
+      const n = { x: -u.y, y: u.x }, m2 = { x: (a2.x + b2.x) / 2, y: (a2.y + b2.y) / 2 };
+      const dd = (m2.x - a1.x) * n.x + (m2.y - a1.y) * n.y, sg = Math.sign(dd) || 1, e = Math.abs(dd) - T;
+      if (apply && (W1 || W2)) {
+        const f1 = e * W1 / (W1 + W2) * sg, f2 = e * W2 / (W1 + W2) * sg;
+        for (const p of [a1, b1]) { p.x += n.x * f1; p.y += n.y * f1; }
+        for (const p of [a2, b2]) { p.x -= n.x * f2; p.y -= n.y * f2; }
+      }
+      return Math.abs(e);
+    } });
+  }
+  return cs;
+}
+// Liefert die Wände, deren Bedingungen nicht erfüllt werden konnten (Widerspruch)
+function solve(pinned = new Set(), iters = 500) {
+  const cs = buildConstraints(pinned);
   for (let k = 0; k < iters; k++) {
     let err = 0;
-    for (const c of cons) {
-      const wa = pinned.has(c.a.id) ? 0 : 1, wb = pinned.has(c.b.id) ? 0 : 1;
-      if (!wa && !wb) continue;
-      const e = (c.b.x - c.a.x) * c.nx + (c.b.y - c.a.y) * c.ny;
-      err = Math.max(err, Math.abs(e));
-      const fa = e * wa / (wa + wb), fb = e * wb / (wa + wb);
-      c.a.x += c.nx * fa; c.a.y += c.ny * fa; c.b.x -= c.nx * fb; c.b.y -= c.ny * fb;
-    }
-    for (const g of groups.values()) {
-      const A = N.get(g.ends[0]), B = N.get(g.ends[1]);
-      for (const id of g.interior) {
-        if (pinned.has(id)) continue;
-        const p = N.get(id), r = projLine(p, A, B);
-        err = Math.max(err, dist(p, r)); p.x = r.x; p.y = r.y;
-      }
-    }
+    for (const c of cs) err = Math.max(err, c.run(true));
     if (err < 0.01) break;
   }
+  const bad = new Set();
+  for (const c of cs) if (c.run(false) > 0.5) c.ids.forEach(id => bad.add(id));
+  return bad;
+}
+// Abstand zweier paralleler Wände: Zielabstand der Linien = lichtes Maß + Versatz der zugewandten Flächen
+function dimSetup(d) {
+  const w1 = wallById(d.w1), w2 = wallById(d.w2); if (!w1 || !w2) return null;
+  const a1 = nodeById(w1.a), b1 = nodeById(w1.b), a2 = nodeById(w2.a), b2 = nodeById(w2.b);
+  const u1 = unit(a1, b1), u2 = unit(a2, b2); if (!u1 || !u2) return null;
+  const n1 = { x: -u1.y, y: u1.x }, n2 = { x: -u2.y, y: u2.x };
+  const dd = ((a2.x + b2.x) / 2 - a1.x) * n1.x + ((a2.y + b2.y) / 2 - a1.y) * n1.y, sg = Math.sign(dd) || 1;
+  const [l1, r1] = wallOffsets(w1), [l2, r2] = wallOffsets(w2);
+  const o1 = sg > 0 ? l1 : r1;                                       // Fläche von w1 Richtung w2
+  const o2 = (n2.x * -sg * n1.x + n2.y * -sg * n1.y) > 0 ? l2 : r2;  // Fläche von w2 Richtung w1
+  return { a1, b1, a2, b2, T: d.v + o1 + o2, o1, o2, n1, sg };
 }
 
 // ---------- Modell-Operationen ----------
 function splitWall(w, x, y) {
   const n = { id: uid(), x, y }; doc.nodes.push(n);
   if (w.line == null) w.line = uid();
-  doc.walls.push({ id: uid(), a: n.id, b: w.b, thick: w.thick, side: w.side, dir: w.dir, line: w.line });
+  w.mass = null;                               // Maß galt für die ganze Wand
+  doc.walls.push({ id: uid(), a: n.id, b: w.b, thick: w.thick, side: w.side, dir: w.dir, line: w.line, mass: null });
   w.b = n.id;
   return n.id;
 }
@@ -236,6 +316,7 @@ function cleanup() {
   const seen = new Set();
   doc.walls = doc.walls.filter(w => { const k = Math.min(w.a, w.b) + '-' + Math.max(w.a, w.b); if (seen.has(k)) return false; seen.add(k); return true; });
   doc.nodes = doc.nodes.filter(n => doc.walls.some(w => w.a === n.id || w.b === n.id));
+  doc.dims = doc.dims.filter(d => wallById(d.w1) && wallById(d.w2));
   // Linien neu ordnen: jedes zusammenhängende Stück bekommt eine eigene Kennung
   const byLine = new Map();
   for (const w of doc.walls) if (w.line != null) { if (!byLine.has(w.line)) byLine.set(w.line, []); byLine.get(w.line).push(w); }
@@ -267,7 +348,7 @@ function placePoint(sn) {
   if (dist(sn, fp) * view.s < 6) { endChain(); return; }   // erneut auf letzten Punkt = fertig
   const before = snapshot();
   const a = resolve(chain.from), b = resolve(sn);
-  if (a !== b && !hasWall(a, b)) doc.walls.push({ id: uid(), a, b, thick: settings().lastThick, side: 'C', dir: null, line: null });
+  if (a !== b && !hasWall(a, b)) doc.walls.push({ id: uid(), a, b, thick: settings().lastThick, side: 'C', dir: null, line: null, mass: null });
   const onExisting = sn.kind === 'node' || sn.kind === 'wall';
   chain = onExisting ? null : { from: { x: sn.x, y: sn.y, nodeId: b, kind: 'node' } };
   commit(before);
@@ -373,12 +454,72 @@ function setThick(t) {
   if (!(t > 0 && t < 300)) return;
   const before = snapshot();
   for (const w of selWalls()) w.thick = t;
-  settings().lastThick = t; commit(before);
+  settings().lastThick = t; solve(new Set(), 3000); commit(before);   // Innenmaße bleiben richtig
 }
 function setSide(mode) {
   const before = snapshot();
   for (const w of selWalls()) w.side = mode === 'C' ? 'C' : w.side === 'L' ? 'R' : 'L';
-  commit(before);
+  solve(new Set(), 3000); commit(before);
+}
+
+// ---------- Stufe 4: Maße / Flucht ----------
+const parallel = (w1, w2) => { const d = Math.abs(norm180(wallAngle(w1)) - norm180(wallAngle(w2))); return Math.min(d, 180 - d) < 1.5; };
+const innerSide = w => (w.side === 'L' ? 'R' : w.side === 'R' ? 'L' : null);   // Außenwand: Innenkante
+const shownSide = w => w.mass?.side || innerSide(w) || 'L';
+function defaultMeasure(w, wp) {
+  const a = nodeById(w.a), b = nodeById(w.b), u = unit(a, b) || { x: 1, y: 0 };
+  const side = w.mass?.side || innerSide(w) || ((wp.x - a.x) * -u.y + (wp.y - a.y) * u.x >= 0 ? 'L' : 'R');
+  const score = id => doc.walls.filter(x => x !== w && (x.a === id || x.b === id) && (x.mass || x.dir != null)).length * 1e6
+    - dist(nodeById(id), settings().origin);
+  return { side, anchor: score(w.a) >= score(w.b) ? w.a : w.b };
+}
+function tryChange(before, pinned, okMsg) {   // lösen; bei Widerspruch alles zurück und rot markieren
+  const bad = solve(pinned, 6000);
+  if (bad.size) {
+    doc = JSON.parse(before); conflict = bad;
+    toast('Passt nicht zu den vorhandenen Maßen – beteiligte Wände sind rot markiert');
+    refresh(); return false;
+  }
+  conflict = new Set(); commit(before); if (okMsg) toast(okMsg); return true;
+}
+function applyMass(m) {
+  const w = selWalls()[0]; if (!w || !(m > 0 && m < 200)) return;
+  const before = snapshot();
+  w.mass = { v: Math.round(m * 1000) / 10, side: meas.side };   // Meter → cm (auf mm)
+  tryChange(before, new Set([meas.anchor]));
+}
+function removeMass() { const before = snapshot(); selWalls().forEach(w => { w.mass = null; }); conflict = new Set(); commit(before); }
+function applyDim(m) {
+  if (sel?.type !== 'dim' || !(m >= 0 && m < 200)) return;
+  const before = snapshot();
+  let d = doc.dims.find(x => x.id === sel.id);
+  if (!d) { d = { id: uid(), kind: 'dist', w1: sel.w1, w2: sel.w2, v: 0 }; doc.dims.push(d); sel.id = d.id; }
+  d.v = Math.round(m * 1000) / 10;
+  const w1 = wallById(d.w1);
+  tryChange(before, new Set([w1.a, w1.b]));
+}
+function removeDim(id) { const before = snapshot(); doc.dims = doc.dims.filter(d => d.id !== id); sel = null; conflict = new Set(); commit(before); }
+function applyFlucht(id1, id2) {
+  const before = snapshot(), w1 = wallById(id1);
+  doc.dims.push({ id: uid(), kind: 'line', w1: id1, w2: id2 });
+  if (tryChange(before, new Set([w1.a, w1.b]), 'Wände in eine Flucht gebracht')) sel = { type: 'wall', ids: [id2] };
+  refresh();
+}
+function dimScreen(d) {   // Maßlinie in Bildschirm-Koordinaten
+  const s = dimSetup(d); if (!s) return null;
+  // bei 30 % der Wand statt mittig, damit sich Abstand und Wandmaß nicht überdecken
+  const m1 = { x: s.a1.x + (s.b1.x - s.a1.x) * 0.3, y: s.a1.y + (s.b1.y - s.a1.y) * 0.3 }, m2 = { x: (s.a2.x + s.b2.x) / 2, y: (s.a2.y + s.b2.y) / 2 };
+  const p0 = projLine({ x: (m1.x + projLine(m2, s.a1, s.b1).x) / 2, y: (m1.y + projLine(m2, s.a1, s.b1).y) / 2 }, s.a1, s.b1);
+  const q0 = projLine(p0, s.a2, s.b2), k = s.sg;
+  const p = { x: p0.x + s.n1.x * s.o1 * k, y: p0.y + s.n1.y * s.o1 * k }, q = { x: q0.x - s.n1.x * s.o2 * k, y: q0.y - s.n1.y * s.o2 * k };
+  return { p: toScreen(p), q: toScreen(q) };
+}
+function hitDim(sp) {
+  for (const d of doc.dims) {
+    if (d.kind === 'line') continue;
+    const s = dimScreen(d); if (s && distPtSeg(sp, s.p, s.q).d < 10) return d;
+  }
+  return null;
 }
 function escapes(p) {   // Punkt liegt außerhalb des Gebäudes, wenn ein Strahl keine Wand trifft
   for (let i = 0; i < 24; i++) {
@@ -475,7 +616,7 @@ function draw() {
     if (settings().transparent) drawChecker(); else { ctx.fillStyle = settings().bg; ctx.fillRect(0, 0, W, H); }
   } else drawGrid();
   ctx.setTransform(DPR * view.s, 0, 0, DPR * view.s, DPR * view.ox, DPR * view.oy);
-  drawPlan(ctx, stage === 7 ? 'final' : stage === 3 ? 'thick' : stage === 2 ? 'angles' : 'sketch', view.s);
+  drawPlan(ctx, ({ 7: 'final', 4: 'measure', 3: 'thick', 2: 'angles' })[stage] || 'sketch', view.s);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (stage !== 7) drawOverlay();
 }
@@ -516,7 +657,7 @@ function drawPlan(c, mode, s) {
     for (const p of [...g.polys.values(), ...g.hubs]) { polyPath(c, p); c.fill(); c.stroke(); }
     return;
   }
-  const base = mode === 'sketch' ? '#e7e5e0' : '#d1d5db';
+  const base = mode === 'sketch' ? '#e7e5e0' : mode === 'measure' ? '#b8bcc4' : '#d1d5db';
   c.fillStyle = mode === 'thick' ? '#6b7280' : base;
   for (const h of g.hubs) { polyPath(c, h); c.fill(); }
   for (const w of doc.walls) {
@@ -524,7 +665,7 @@ function drawPlan(c, mode, s) {
     c.fillStyle = mode === 'thick' ? thickColor(w.thick) : base;
     polyPath(c, p); c.fill();
   }
-  if (mode === 'thick') return;
+  if (mode === 'thick' || mode === 'measure') return;
   c.lineCap = 'round'; c.lineWidth = 2.5 / s;
   for (const w of doc.walls) {
     const a = nodeById(w.a), b = nodeById(w.b);
@@ -540,7 +681,52 @@ function label(text, x, y, color, small) {
   ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y + 1);
 }
 function drawOverlay() {
-  const g = stage === 3 ? geometry() : null;
+  const g = stage === 3 || stage === 4 ? geometry() : null;
+  // Widersprüche
+  for (const id of conflict) {
+    const w = wallById(id); if (!w) continue;
+    const a = toScreen(nodeById(w.a)), b = toScreen(nodeById(w.b));
+    ctx.strokeStyle = 'rgba(220,38,38,.8)'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  // Fluchten (Stufe 2 und 4): gestrichelte Verbindung
+  if (stage === 2 || stage === 4) for (const d of doc.dims) if (d.kind === 'line') {
+    const w1 = wallById(d.w1), w2 = wallById(d.w2); if (!w1 || !w2) continue;
+    const ps = [w1.a, w1.b], qs = [w2.a, w2.b]; let best = null;
+    for (const i of ps) for (const j of qs) { const L = dist(nodeById(i), nodeById(j)); if (!best || L < best.L) best = { L, p: toScreen(nodeById(i)), q: toScreen(nodeById(j)) }; }
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = '#7c3aed'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(best.p.x, best.p.y); ctx.lineTo(best.q.x, best.q.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // Maße (Stufe 4)
+  if (stage === 4) {
+    for (const w of doc.walls) {
+      const p = g.polys.get(w.id); if (!p) continue;
+      const side = shownSide(w), [s, e] = side === 'L' ? [p[0], p[1]] : [p[3], p[2]];
+      const a = toScreen(s), b = toScreen(e); if (dist(a, b) < 40) continue;
+      const u = unit(nodeById(w.a), nodeById(w.b)), k = side === 'L' ? 1 : -1;
+      const x = (a.x + b.x) / 2 - u.y * k * 14, y = (a.y + b.y) / 2 + u.x * k * 14;
+      const col = conflict.has(w.id) ? '#dc2626' : w.mass ? '#15803d' : '#6b7280';
+      label(fmtLen(w.mass ? w.mass.v : faceLen(w, side, g)), x, y, col, !w.mass);
+    }
+    for (const d of doc.dims) {
+      if (d.kind === 'line') continue;
+      const s = dimScreen(d); if (!s) continue;
+      const col = conflict.has(d.w1) && conflict.has(d.w2) ? '#dc2626' : '#15803d';
+      ctx.strokeStyle = col; ctx.lineWidth = sel?.type === 'dim' && sel.id === d.id ? 3 : 1.5;
+      ctx.beginPath(); ctx.moveTo(s.p.x, s.p.y); ctx.lineTo(s.q.x, s.q.y); ctx.stroke();
+      for (const t of [s.p, s.q]) { ctx.beginPath(); ctx.arc(t.x, t.y, 3, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); }
+      label(fmtLen(d.v), (s.p.x + s.q.x) / 2, (s.p.y + s.q.y) / 2, col);
+    }
+    if (sel?.type === 'dim' && !sel.id) {
+      const s = dimScreen({ w1: sel.w1, w2: sel.w2, v: 0 });
+      if (s) { ctx.setLineDash([6, 4]); ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(s.p.x, s.p.y); ctx.lineTo(s.q.x, s.q.y); ctx.stroke(); ctx.setLineDash([]); }
+    }
+    if (sel?.type === 'wall' && meas.anchor && nodeById(meas.anchor)) {   // festes Ende
+      const p = toScreen(nodeById(meas.anchor));
+      ctx.fillStyle = '#111827'; ctx.fillRect(p.x - 6, p.y - 6, 12, 12);
+      label('fest', p.x, p.y - 18, '#111827', true);
+    }
+  }
   // Nullpunkt
   const o = toScreen(settings().origin);
   ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2;
@@ -642,6 +828,24 @@ cv.addEventListener('pointerdown', e => {
   if (e.button === 1 || e.button === 2 || spaceDown || t === 'pan') { startPan(sp); return; }
   if (t === 'wall' || t === 'origin') { gesture = { type: 'draw' }; cursor = findSnap(wp, t === 'wall' ? chainFrom() : null); render(); return; }
   const tol = SNAP_PX / view.s;
+  if (t === 'dim' || t === 'flucht') {   // zwei parallele Wände nacheinander anklicken
+    const w = hitWall(wp, tol);
+    if (!w) { dimPick = null; sel = null; startPan(sp); refresh(); return; }
+    if (!dimPick || dimPick === w.id) { dimPick = w.id; sel = { type: 'wall', ids: [w.id] }; refresh(); return; }
+    const w1 = wallById(dimPick); dimPick = null;
+    if (!parallel(w1, w)) { toast('Die Wände sind nicht parallel – erst Stufe 2 (Winkel) ausführen'); sel = null; refresh(); return; }
+    if (t === 'flucht') { applyFlucht(w1.id, w.id); return; }
+    const ex = doc.dims.find(d => d.kind !== 'line' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
+    sel = ex ? { type: 'dim', id: ex.id, w1: ex.w1, w2: ex.w2 } : { type: 'dim', id: null, w1: w1.id, w2: w.id };
+    refresh(); return;
+  }
+  if (stage === 4) {
+    const d = hitDim(sp);
+    if (d) { sel = { type: 'dim', id: d.id, w1: d.w1, w2: d.w2 }; refresh(); return; }
+    const w = hitWall(wp, tol);
+    if (w) { sel = { type: 'wall', ids: [w.id] }; meas = defaultMeasure(w, wp); refresh(); return; }
+    sel = null; startPan(sp); refresh(); return;
+  }
   if (stage === 3) {                      // Wände wählen (mehrere mit Strg/Umschalt oder „Mehrfach“)
     const w = hitWall(wp, tol);
     const add = multi || e.ctrlKey || e.metaKey || e.shiftKey;
@@ -720,8 +924,8 @@ function setOrigin(p) {
 }
 
 document.addEventListener('keydown', e => {
-  if (e.target.closest?.('input, select, textarea')) return;
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+  if (e.target.closest?.('input, select, textarea') && !(mod && (k === 'z' || k === 'y'))) return;
   if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && k === 'y') { e.preventDefault(); redo(); return; }
   if (mod && k === 'a' && stage === 3) { e.preventDefault(); sel = doc.walls.length ? { type: 'wall', ids: doc.walls.map(w => w.id) } : null; refresh(); return; }
@@ -739,11 +943,12 @@ document.addEventListener('keydown', e => {
 document.addEventListener('keyup', e => { if (e.key === ' ') { spaceDown = false; cv.classList.toggle('pan', activeTool() === 'pan'); } });
 
 // ---------- Oberfläche ----------
-function setTool(t) { tool = t; chain = null; if (t !== 'wall' && t !== 'origin') cursor = null; refresh(); }
+function setTool(t) { tool = t; chain = null; dimPick = null; if (t !== 'wall' && t !== 'origin') cursor = null; refresh(); }
 function setStage(s) {
-  stage = s; chain = null; cursor = null; cornerSwap = false;
-  if (s === 7 || (s === 3 && sel?.type === 'node')) sel = null;
+  stage = s; chain = null; cursor = null; cornerSwap = false; dimPick = null; conflict = new Set();
+  if (s === 7 || s === 4 || sel?.type === 'dim' || (s === 3 && sel?.type === 'node')) sel = null;
   if (s !== 1 && (tool === 'wall' || tool === 'origin')) tool = 'select';
+  if ((s !== 4 && tool === 'dim') || (s !== 2 && tool === 'flucht')) tool = 'select';
   if (s === 1 && tool === 'pan') tool = 'wall';
   refresh();
 }
@@ -763,6 +968,10 @@ function hintText() {
       : 'Ersten Punkt tippen, um Wände zu zeichnen. Grün = Eckpunkt fangen, Orange = auf Wand andocken';
     return 'Wand oder Eckpunkt antippen · ziehen = verschieben · Eckpunkt auf anderen ziehen = verbinden';
   }
+  if (t === 'flucht' || t === 'dim') return dimPick ? 'Zweite, parallele Wand anklicken'
+    : t === 'flucht' ? 'Flucht: erste Wand anklicken (bleibt stehen), dann die Wand, die auf deren Linie soll'
+      : 'Abstand: zwei parallele Wände anklicken, dann lichtes Maß in Metern eingeben';
+  if (stage === 4) return 'Wand anklicken → Innenmaß in Metern eingeben (Enter) · grün = gemessen, grau = gezeichnet';
   if (stage === 2) return 'Orange = noch schief bzw. Richtung frei · Ecke antippen = Winkel setzen · Wand antippen = Richtung fixieren';
   if (stage === 3) {
     const used = [...new Set(doc.walls.map(w => w.thick))].sort((a, b) => b - a);
@@ -781,6 +990,7 @@ function refresh() {
   cv.classList.toggle('pan', activeTool() === 'pan');
   const h = hintText(); $('#hint').innerHTML = h ? `<span>${h}</span>` : '';
   renderProps();
+  const mi = $('#mIn'); if (mi && isMouse) { mi.focus(); mi.select(); }   // direkt lostippen
   render();
 }
 function renderProps() {
@@ -799,11 +1009,27 @@ function renderProps() {
          ${[90, 135, 45].map(a => `<button data-act="ang" data-val="${a}">${a}°</button>`).join('')}
          <button data-act="swap" class="${cornerSwap ? 'on' : ''}">Andere Wand drehen</button>`
       : `<span class="info">Winkel nur an Ecken mit genau zwei Wänden einstellbar</span>`;
+  } else if (stage === 4 && sel?.type === 'dim') {
+    const d = doc.dims.find(x => x.id === sel.id);
+    p.innerHTML = `<span class="info">Abstand (lichtes Maß)${d ? ` <b>${fmtLen(d.v)}</b>` : ''}</span>
+      <input id="mIn" inputmode="decimal" placeholder="m" value="${d ? fmtM(d.v) : ''}"><button class="primary" data-act="dimSet">Übernehmen</button>
+      ${d ? '<button class="danger" data-act="dimDel">Löschen</button>' : ''}`;
+  } else if (stage === 4 && ws.length) {
+    const w = ws[0], cur = faceLen(w, meas.side, geometry());
+    p.innerHTML = `<span class="info">Innenmaß ${w.mass ? `<b>${fmtLen(w.mass.v)}</b>` : `(gezeichnet ${fmtLen(cur)})`}</span>
+      <input id="mIn" inputmode="decimal" placeholder="m" value="${fmtM(w.mass ? w.mass.v : cur)}"><button class="primary" data-act="mSet">Übernehmen</button>
+      <span class="sep"></span>
+      <button data-act="mSide">Andere Seite</button><button data-act="mAnchor">Anderes Ende fest</button>
+      ${w.mass ? '<button class="danger" data-act="mDel">Maß löschen</button>' : ''}`;
+  } else if (stage === 4) {
+    const n = doc.walls.filter(w => w.mass).length, free = doc.walls.filter(w => w.dir == null).length;
+    p.innerHTML = `<span class="info">${n} von ${doc.walls.length} Wänden bemaßt · ${doc.dims.filter(d => d.kind !== 'line').length} Abstände${free ? ` · <b>${free} Wände ohne feste Richtung – erst Stufe 2</b>` : ''}</span>`;
   } else if (stage === 2 && ws.length) {
-    const w = ws[0];
-    p.innerHTML = w.dir != null
+    const w = ws[0], fl = doc.dims.filter(d => d.kind === 'line' && (d.w1 === w.id || d.w2 === w.id));
+    p.innerHTML = (w.dir != null
       ? `<span class="info">Wand · Richtung <b>${w.dir}°</b> fixiert · ${fmtLen(wallLen(w))}</span><button data-act="unfix">Lösen</button>`
-      : `<span class="info">Wand · frei (${fmtNum(norm180(wallAngle(w)))}°) · ${fmtLen(wallLen(w))}</span><button class="primary" data-act="fix">Auf nächste 45° fixieren</button>`;
+      : `<span class="info">Wand · frei (${fmtNum(norm180(wallAngle(w)))}°) · ${fmtLen(wallLen(w))}</span><button class="primary" data-act="fix">Auf nächste 45° fixieren</button>`)
+      + (fl.length ? `<button data-act="unflucht">Flucht lösen</button>` : '');
   } else if (stage === 2) {
     const free = doc.walls.filter(w => w.dir == null).length;
     p.innerHTML = `<button class="primary" data-act="align">Alle Winkel ausrichten</button>
@@ -843,10 +1069,22 @@ $('#props').addEventListener('click', e => {
   else if (a === 'side') setSide('flip');
   else if (a === 'center') setSide('C');
   else if (a === 'outer') detectOuter();
+  else if (a === 'mSet') applyMass(parseNum($('#mIn').value));
+  else if (a === 'mSide') { meas.side = meas.side === 'L' ? 'R' : 'L'; refresh(); }
+  else if (a === 'mAnchor') { const w = selWalls()[0]; meas.anchor = other(w, meas.anchor); refresh(); }
+  else if (a === 'mDel') removeMass();
+  else if (a === 'dimSet') applyDim(parseNum($('#mIn').value));
+  else if (a === 'dimDel') removeDim(sel.id);
+  else if (a === 'unflucht') {
+    const id = selWalls()[0].id, before = snapshot();
+    doc.dims = doc.dims.filter(d => !(d.kind === 'line' && (d.w1 === id || d.w2 === id))); commit(before);
+  }
   else if (a === 'all') { sel = doc.walls.length ? { type: 'wall', ids: doc.walls.map(w => w.id) } : null; refresh(); }
 });
 $('#props').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { sel = null; e.target.blur(); refresh(); return; }
   if (e.key !== 'Enter') return;
+  if (e.target.id === 'mIn') (sel?.type === 'dim' ? applyDim : applyMass)(parseNum(e.target.value));
   if (e.target.id === 'angIn') setCornerAngle(sel.id, parseNum(e.target.value));
   if (e.target.id === 'thIn') setThick(parseNum(e.target.value));
 });
