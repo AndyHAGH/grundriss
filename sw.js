@@ -1,5 +1,5 @@
 // Offline-Unterstützung: Netzwerk zuerst, bei fehlender Verbindung aus dem Cache.
-const CACHE = 'grundriss-0.1.0';
+const CACHE = 'grundriss-0.2.0';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => {

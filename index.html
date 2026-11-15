@@ -15,8 +15,8 @@
 <header id="bar">
   <div id="stages">
     <button class="stage" data-stage="1">1 Skizze</button>
-    <button class="stage" data-stage="2" disabled title="folgt in v0.2">2 Winkel</button>
-    <button class="stage" data-stage="3" disabled title="folgt in v0.2">3 Dicke</button>
+    <button class="stage" data-stage="2">2 Winkel</button>
+    <button class="stage" data-stage="3">3 Dicke</button>
     <button class="stage" data-stage="4" disabled title="folgt in v0.3">4 Maße</button>
     <button class="stage" data-stage="5" disabled title="folgt in v0.4">5 Fenster/Türen</button>
     <button class="stage" data-stage="6" disabled title="folgt in v0.5">6 Einrichtung</button>
@@ -31,16 +31,19 @@
 
 <main>
   <nav id="tools">
-    <button class="tool sketch-only" data-tool="wall" title="Wand zeichnen (W)"><b>✎</b><span>Wand</span></button>
-    <button class="tool sketch-only" data-tool="select" title="Auswählen/Verschieben (V)"><b>⬚</b><span>Auswahl</span></button>
-    <button class="tool" data-tool="pan" title="Ansicht verschieben (H)"><b>✋</b><span>Ansicht</span></button>
-    <button id="fit" title="Alles zeigen (F)"><b>⤢</b><span>Alles</span></button>
-    <button id="orthoBtn" class="sketch-only toggle" title="Gerade Linien fangen (0°/45°/90°)"><b>∟</b><span>Fangen</span></button>
-    <button id="exportBtn2" class="preview-only" title="Bild exportieren"><b>⇩</b><span>Export</span></button>
+    <button class="tool" data-tool="wall" data-stages="1" title="Wand zeichnen (W)"><b>✎</b><span>Wand</span></button>
+    <button class="tool" data-tool="select" data-stages="1,2,3" title="Auswählen/Verschieben (V)"><b>⬚</b><span>Auswahl</span></button>
+    <button class="tool" data-tool="origin" data-stages="1" title="Nullpunkt setzen (N)"><b>⊕</b><span>Nullpunkt</span></button>
+    <button class="tool" data-tool="pan" data-stages="1,2,3,7" title="Ansicht verschieben (H)"><b>✋</b><span>Ansicht</span></button>
+    <button id="fit" data-stages="1,2,3,7" title="Alles zeigen (F)"><b>⤢</b><span>Alles</span></button>
+    <button id="orthoBtn" class="toggle" data-stages="1" title="Gerade Linien fangen (0°/45°/90°)"><b>∟</b><span>Fangen</span></button>
+    <button id="multiBtn" class="toggle" data-stages="3" title="Mehrfachauswahl (sonst Strg+Klick)"><b>⧉</b><span>Mehrfach</span></button>
+    <button id="exportBtn2" data-stages="7" title="Bild exportieren"><b>⇩</b><span>Export</span></button>
   </nav>
   <div id="wrap">
     <canvas id="cv"></canvas>
     <div id="hint"></div>
+    <div id="toast" hidden></div>
   </div>
 </main>
 

@@ -124,3 +124,9 @@ Die linke Werkzeugleiste und die Eigenschaftsleiste wechseln je Stufe ihren Inha
 - Eingabe: zuerst nur **Windows-PC** (Maus). iPad mit Apple Pencil kommt später und ist vorbereitet:
   Pointer-Events für Maus/Stift/Touch, große Bedienelemente, keine Rechtsklick-Pflicht.
 - Möbel: einfache 2D-Symbole in Draufsicht
+
+### v0.2 (2026-11-15)
+- Bezugslinie: Außenwand = Innenkante (Dicke nach außen), Innenwand = Mitte
+- Wanddicken-Vorlagen 36,5 / 30 / 24 / 17,5 / 11,5 cm; Ausrichten auch auf 45°; Wände vollflächig
+- Durchgehende Wände bleiben bei angedockten Wänden gerade (Anschluss gleitet auf der Wand)
+- Nullpunkt frei setzbar, Koordinatenanzeige relativ dazu
