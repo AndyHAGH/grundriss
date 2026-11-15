@@ -1,7 +1,7 @@
 'use strict';
 /* Grundriss – einfaches 2D-CAD für Bestandspläne. Einheiten im Modell: Zentimeter, y zeigt nach unten. */
 (() => {
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const STORE_KEY = 'grundriss.projekt.v1';
 const SNAP_PX = 16;        // Fangradius in Bildschirm-Pixeln (Touch-/Stift-freundlich)
 const ORTHO_TOL = 6;       // Grad: Fanghilfe beim Zeichnen
@@ -237,14 +237,18 @@ function buildConstraints(pinned) {
     const w1 = wallById(d.w1), w2 = wallById(d.w2); if (!w1 || !w2) continue;
     const a1 = N.get(w1.a), b1 = N.get(w1.b), a2 = N.get(w2.a), b2 = N.get(w2.b);
     const W1 = wt(a1) && wt(b1) ? 1 : 0, W2 = wt(a2) && wt(b2) ? 1 : 0;
+    // Verschoben wird nur senkrecht zur (festen) Richtung der Bezugswand – sonst wandern weit entfernte Punkte seitlich
+    const fixedN = w1.dir != null ? { x: -Math.sin(w1.dir * Math.PI / 180), y: Math.cos(w1.dir * Math.PI / 180) } : null;
     cs.push({ ids: [d.w1, d.w2], run(apply) {
       let err = 0;
+      const n = fixedN || (() => { const u = unit(a1, b1); return u ? { x: -u.y, y: u.x } : null; })();
+      if (!n) return 0;
       for (const p of [a2, b2]) {
-        const r = projLine(p, a1, b1), ex = r.x - p.x, ey = r.y - p.y; err = Math.max(err, Math.hypot(ex, ey));
+        const e = (p.x - a1.x) * n.x + (p.y - a1.y) * n.y; err = Math.max(err, Math.abs(e));
         if (apply && (W1 || W2)) {
           const f2 = W2 / (W1 + W2), f1 = W1 / (W1 + W2) / 2;
-          p.x += ex * f2; p.y += ey * f2;
-          for (const q of [a1, b1]) { q.x -= ex * f1; q.y -= ey * f1; }
+          p.x -= n.x * e * f2; p.y -= n.y * e * f2;
+          for (const q of [a1, b1]) { q.x += n.x * e * f1; q.y += n.y * e * f1; }
         }
       }
       return err;
@@ -499,12 +503,38 @@ function applyDim(m) {
   tryChange(before, new Set([w1.a, w1.b]));
 }
 function removeDim(id) { const before = snapshot(); doc.dims = doc.dims.filter(d => d.id !== id); sel = null; conflict = new Set(); commit(before); }
-function applyFlucht(id1, id2) {
-  const before = snapshot(), w1 = wallById(id1);
-  doc.dims.push({ id: uid(), kind: 'line', w1: id1, w2: id2 });
-  if (tryChange(before, new Set([w1.a, w1.b]), 'Wände in eine Flucht gebracht')) sel = { type: 'wall', ids: [id2] };
-  refresh();
+// Fluchten: alle Wände auf die Linie der ersten Wand bringen; Versprünge mit 0 cm Länge entfallen
+const nearParallel = (w1, w2) => { const d = Math.abs(norm180(wallAngle(w1)) - norm180(wallAngle(w2))); return Math.min(d, 180 - d) <= ALIGN_TOL; };
+function alignLine(ids) {
+  const ref = wallById(ids[0]), others = ids.slice(1).map(wallById).filter(Boolean);
+  if (!ref || !others.length) return;
+  if (!others.every(w => nearParallel(ref, w))) { toast('Nur (annähernd) parallele Wände lassen sich auf eine Linie bringen'); return; }
+  const before = snapshot();
+  // Richtung: liegt die Bezugswand nahe 0/45/90/135°, wird sie exakt ausgerichtet
+  if (ref.dir == null) { const a = norm180(wallAngle(ref)), r = Math.round(a / 45) * 45; if (Math.abs(a - r) <= ALIGN_TOL) ref.dir = r % 180; }
+  // Versprünge (Wände, die zwei markierte Wände verbinden) entfernen
+  const owner = new Map(); ids.forEach(id => { const w = wallById(id); owner.set(w.a, id); owner.set(w.b, id); });
+  const steps = doc.walls.filter(w => !ids.includes(w.id) && owner.has(w.a) && owner.has(w.b) && owner.get(w.a) !== owner.get(w.b));
+  for (const s of steps) if (wallById(s.id)) mergeNodes(s.b, s.a);
+  for (const w of others) {
+    if (!wallById(w.id)) continue;
+    if (ref.dir != null) w.dir = ref.dir;
+    if (doc.dims.some(d => d.kind === 'line' && ((d.w1 === ref.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === ref.id)))) continue;
+    doc.dims.push({ id: uid(), kind: 'line', w1: ref.id, w2: w.id });
+  }
+  const bad = solve(new Set([ref.a]), 6000);
+  if (bad.size) {
+    doc = JSON.parse(before); conflict = bad;
+    toast('Geht nicht: widerspricht vorhandenen Maßen (rot markiert) – ggf. Maß der Versprung-Wand löschen');
+    refresh(); return;
+  }
+  let removed = steps.length;
+  for (let w; (w = doc.walls.find(x => wallLen(x) < 0.5));) { mergeNodes(w.b, w.a); removed++; }
+  conflict = new Set(); sel = { type: 'wall', ids: ids.filter(id => wallById(id)) };
+  commit(before);
+  toast(`${ids.length} Wände auf eine Linie gebracht${removed ? ` · ${removed} Versprung entfernt` : ''}`);
 }
+const applyFlucht = (id1, id2) => alignLine([id1, id2]);
 function dimScreen(d) {   // Maßlinie in Bildschirm-Koordinaten
   const s = dimSetup(d); if (!s) return null;
   // bei 30 % der Wand statt mittig, damit sich Abstand und Wandmaß nicht überdecken
@@ -833,7 +863,7 @@ cv.addEventListener('pointerdown', e => {
     if (!w) { dimPick = null; sel = null; startPan(sp); refresh(); return; }
     if (!dimPick || dimPick === w.id) { dimPick = w.id; sel = { type: 'wall', ids: [w.id] }; refresh(); return; }
     const w1 = wallById(dimPick); dimPick = null;
-    if (!parallel(w1, w)) { toast('Die Wände sind nicht parallel – erst Stufe 2 (Winkel) ausführen'); sel = null; refresh(); return; }
+    if (t === 'dim' && !parallel(w1, w)) { toast('Die Wände sind nicht parallel – erst Stufe 2 (Winkel) ausführen'); sel = null; refresh(); return; }
     if (t === 'flucht') { applyFlucht(w1.id, w.id); return; }
     const ex = doc.dims.find(d => d.kind !== 'line' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
     sel = ex ? { type: 'dim', id: ex.id, w1: ex.w1, w2: ex.w2 } : { type: 'dim', id: null, w1: w1.id, w2: w.id };
@@ -860,6 +890,14 @@ cv.addEventListener('pointerdown', e => {
     }
     if (!add) sel = null;
     startPan(sp); refresh(); return;
+  }
+  if (stage === 2 && (e.ctrlKey || e.metaKey || e.shiftKey)) {   // Strg+Klick: mehrere Wände markieren
+    const w = hitWall(wp, tol);
+    if (w) {
+      const cur = sel?.type === 'wall' ? sel.ids : [];
+      const next = cur.includes(w.id) ? cur.filter(id => id !== w.id) : [...cur, w.id];
+      sel = next.length ? { type: 'wall', ids: next } : null; refresh(); return;
+    }
   }
   const n = hitNode(wp, tol);
   if (n) { sel = { type: 'node', id: n.id }; cornerSwap = false; gesture = { type: 'dragNode', id: n.id, before: snapshot(), start: wp, sp, moved: false }; refresh(); return; }
@@ -972,7 +1010,7 @@ function hintText() {
     : t === 'flucht' ? 'Flucht: erste Wand anklicken (bleibt stehen), dann die Wand, die auf deren Linie soll'
       : 'Abstand: zwei parallele Wände anklicken, dann lichtes Maß in Metern eingeben';
   if (stage === 4) return 'Wand anklicken → Innenmaß in Metern eingeben (Enter) · grün = gemessen, grau = gezeichnet';
-  if (stage === 2) return 'Orange = noch schief bzw. Richtung frei · Ecke antippen = Winkel setzen · Wand antippen = Richtung fixieren';
+  if (stage === 2) return 'Strg+Klick = mehrere Wände markieren → „Auf eine Linie ausrichten“ · Orange = noch schief bzw. Richtung frei · Ecke antippen = Winkel setzen · Wand antippen = Richtung fixieren';
   if (stage === 3) {
     const used = [...new Set(doc.walls.map(w => w.thick))].sort((a, b) => b - a);
     return 'Wand antippen (Strg+Klick = mehrere) · ' + used.map(t => `<i class="chip" style="background:${thickColor(t)}"></i>${fmtNum(t)} cm`).join('');
@@ -1024,6 +1062,9 @@ function renderProps() {
   } else if (stage === 4) {
     const n = doc.walls.filter(w => w.mass).length, free = doc.walls.filter(w => w.dir == null).length;
     p.innerHTML = `<span class="info">${n} von ${doc.walls.length} Wänden bemaßt · ${doc.dims.filter(d => d.kind !== 'line').length} Abstände${free ? ` · <b>${free} Wände ohne feste Richtung – erst Stufe 2</b>` : ''}</span>`;
+  } else if (stage === 2 && ws.length > 1) {
+    p.innerHTML = `<span class="info"><b>${ws.length}</b> Wände markiert · die zuerst markierte bleibt stehen</span>
+      <button class="primary" data-act="alignLine">Auf eine Linie ausrichten</button>`;
   } else if (stage === 2 && ws.length) {
     const w = ws[0], fl = doc.dims.filter(d => d.kind === 'line' && (d.w1 === w.id || d.w2 === w.id));
     p.innerHTML = (w.dir != null
@@ -1069,6 +1110,7 @@ $('#props').addEventListener('click', e => {
   else if (a === 'side') setSide('flip');
   else if (a === 'center') setSide('C');
   else if (a === 'outer') detectOuter();
+  else if (a === 'alignLine') alignLine(sel.ids.slice())
   else if (a === 'mSet') applyMass(parseNum($('#mIn').value));
   else if (a === 'mSide') { meas.side = meas.side === 'L' ? 'R' : 'L'; refresh(); }
   else if (a === 'mAnchor') { const w = selWalls()[0]; meas.anchor = other(w, meas.anchor); refresh(); }
