@@ -3,7 +3,7 @@
 Einfaches 2D-CAD im Browser, um Grundrisse von bestehenden Gebäuden zu zeichnen und als PNG für
 Home Assistant zu exportieren. Konzept: [KONZEPT.md](KONZEPT.md)
 
-**Version 0.3.1.** Zielgerät ist vorerst ein Windows-PC (Chrome/Edge). Die Bedienung über Pointer-Events ist
+**Version 0.4.0.** Zielgerät ist vorerst ein Windows-PC (Chrome/Edge). Die Bedienung über Pointer-Events ist
 für iPad und Apple Pencil vorbereitet.
 
 ## Starten
@@ -17,7 +17,9 @@ für iPad und Apple Pencil vorbereitet.
 | 2 Winkel | **„Alle Winkel ausrichten“:** Ist der Plan insgesamt schief, wird er zuerst gerade gedreht. Danach werden Wände, die bis zu ±10° von 0°/45°/90°/135° abweichen, exakt ausgerichtet und fixiert. Ecke anklicken → Winkel eingeben oder 90°/135°/45° wählen; „Andere Wand drehen“ tauscht die Wand, die gedreht wird. Wand anklicken → Richtung fixieren oder lösen. Orange markiert, was noch schief bzw. frei ist. |
 | 3 Dicke | Wand anklicken (mehrere mit Strg+Klick oder „Mehrfach“, alle mit Strg+A), dann 36,5 / 30 / 24 / 17,5 / 11,5 cm oder einen eigenen Wert wählen. **„Außenwände erkennen“:** wählt die Außenwände aus und legt ihre Linie auf die Innenkante, die Dicke wächst nach außen. „Seite wechseln“ und „Mittig“ ändern das je Wand. Die Farben zeigen die Dicke. |
 | 2 Winkel – Flucht | **Mehrere Wände auf eine Linie:** mit Strg+Klick markieren (die zuerst markierte bleibt stehen), dann „Auf eine Linie ausrichten“. Die Wände müssen nicht verbunden sein. Versprünge, die zwei markierte Wände direkt verbinden, werden entfernt; echte Rücksprünge aus mehreren Wänden bleiben erhalten. Alternativ Werkzeug „Flucht“: zwei Wände nacheinander anklicken. Fluchten bleiben erhalten (lila gestrichelt), „Flucht lösen“ hebt sie auf. |
+| 2 Winkel – Ecken | Ecken mit Strg+Klick markieren (die zuerst markierte bleibt stehen), dann „Waagerecht auf eine Linie“ (gleiche Höhe) oder „Senkrecht auf eine Linie“. Bleibt erhalten (türkis gestrichelt); an einer markierten Ecke „Ecken-Ausrichtung lösen“. |
 | 4 Maße | Wand anklicken und das **Innenmaß in Metern** eintippen (z. B. `4,12`), Enter übernimmt. Bei Außenwänden ist die Innenseite vorgewählt, bei Innenwänden die angeklickte Seite; „Andere Seite“ wechselt sie. Das schwarze Quadrat („fest“) markiert das Ende, das stehen bleibt; „Anderes Ende fest“ tauscht es. Werkzeug **„Abstand“:** zwei parallele Wände anklicken und den lichten Abstand eingeben. Grün = gemessen, grau = gezeichnet. Ein Maß, das den vorhandenen widerspricht, wird nicht übernommen, die beteiligten Wände werden rot markiert. Innenmaße bleiben auch bei geänderter Wanddicke erhalten. |
+| 5 Fenster/Türen | Typ links wählen (Tür, Doppeltür, Schiebetür, Durchgang, Fenster) und auf eine Wand klicken. Unten Breite und Abstand zur grün markierten Ecke in Metern eingeben (Innenmaß ab Wandfläche); „Andere Ecke“ wechselt den Bezug. Öffnung anklicken = bearbeiten, ziehen = entlang der Wand verschieben, Entf = löschen. Türen: „Anschlag wechseln“, „Öffnet zur anderen Seite“. Öffnungen behalten ihren Abstand zur Bezugsecke, auch wenn sich Maße ändern. |
 | 7 Vorschau | Ansicht ohne Hilfslinien, Export als PNG |
 
 **Gerade Wände:** Wird eine Wand an eine durchgehende Wand angedockt, bleibt diese beim Ziehen gerade. Der Anschlusspunkt gleitet entlang der Wand.
@@ -32,6 +34,7 @@ für iPad und Apple Pencil vorbereitet.
 PNG, 2000 px breit, die Höhe ergibt sich aus dem Plan. Rand 50 cm, Hintergrund laut Einstellung.
 
 ## Versionen
+- 0.4.0: Stufe 5 Fenster/Türen (Tür, Doppeltür, Schiebetür, Durchgang, Fenster; Wand wird an Türen unterbrochen, Fenster als Symbol in der Wand); Stufe 2 – Ecken waagerecht/senkrecht auf eine Linie
 - 0.3.1: Stufe 2 – mehrere Wände per Strg+Klick auf eine Linie ausrichten, Versprünge werden entfernt; Fehler behoben, durch den weit entfernte Wände beim Fluchten seitlich verrutschten
 - 0.3.0: Stufe 4 Maße (Innenmaß in m, Abstand paralleler Wände, Widerspruchsprüfung), Flucht (nicht verbundene
   Wände auf eine Linie)

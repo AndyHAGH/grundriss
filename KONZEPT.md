@@ -134,3 +134,9 @@ Die linke Werkzeugleiste und die Eigenschaftsleiste wechseln je Stufe ihren Inha
 ### v0.3 (2026-11-15)
 - Maße als Innenmaß (Lichtmaß), Eingabe immer in Metern, kein automatischer Rundgang, Bemaßung einfach
 - Zusätzlich: Flucht – nicht verbundene Wände auf eine Linie bringen (Stufe 2)
+
+### v0.4 (2026-11-15)
+- Typen Tür, Doppeltür, Schiebetür, Durchgang, Fenster; Aufschlagbogen auch im PNG; Fenster als einfaches Symbol
+- Wand wird an Öffnungen geometrisch aufgeteilt (funktioniert auch mit transparentem Hintergrund)
+- Abstand der Öffnung = Innenmaß von der Wandfläche der Bezugsecke
+- Zusätzlich: Ecken waagerecht/senkrecht auf eine Linie (Stufe 2)

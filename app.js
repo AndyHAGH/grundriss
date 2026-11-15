@@ -1,7 +1,7 @@
 'use strict';
 /* Grundriss – einfaches 2D-CAD für Bestandspläne. Einheiten im Modell: Zentimeter, y zeigt nach unten. */
 (() => {
-const VERSION = '0.3.1';
+const VERSION = '0.4.0';
 const STORE_KEY = 'grundriss.projekt.v1';
 const SNAP_PX = 16;        // Fangradius in Bildschirm-Pixeln (Touch-/Stift-freundlich)
 const ORTHO_TOL = 6;       // Grad: Fanghilfe beim Zeichnen
@@ -43,6 +43,8 @@ function migrate(d) {
     if (w.mass === undefined) w.mass = null;
   }
   if (!Array.isArray(d.dims)) d.dims = [];
+  if (!Array.isArray(d.openings)) d.openings = [];
+  d.settings.lastW = Object.assign({ door: 80, door2: 150, slide: 100, pass: 90, window: 100 }, d.settings.lastW);
   return d;
 }
 const settings = () => doc.settings;
@@ -233,6 +235,15 @@ function buildConstraints(pinned) {
       return Math.abs(e);
     } });
   }
+  for (const d of doc.dims) if (d.kind === 'nalign') {   // zwei Ecken auf gleicher Höhe (h) bzw. senkrecht übereinander (v)
+    const p = N.get(d.n1), q = N.get(d.n2); if (!p || !q) continue;
+    const k = d.axis === 'h' ? 'y' : 'x';
+    cs.push({ ids: doc.walls.filter(w => [w.a, w.b].includes(p.id) || [w.a, w.b].includes(q.id)).map(w => w.id), run(apply) {
+      const e = q[k] - p[k], wp = wt(p), wq = wt(q);
+      if (apply && (wp || wq)) { p[k] += e * wp / (wp + wq); q[k] -= e * wq / (wp + wq); }
+      return Math.abs(e);
+    } });
+  }
   for (const d of doc.dims) if (d.kind === 'line') {   // Flucht: Wand 2 liegt auf der Linie von Wand 1
     const w1 = wallById(d.w1), w2 = wallById(d.w2); if (!w1 || !w2) continue;
     const a1 = N.get(w1.a), b1 = N.get(w1.b), a2 = N.get(w2.a), b2 = N.get(w2.b);
@@ -254,7 +265,7 @@ function buildConstraints(pinned) {
       return err;
     } });
   }
-  for (const d of doc.dims) if (d.kind !== 'line') {
+  for (const d of doc.dims) if (d.kind === 'dist') {
     const s = dimSetup(d); if (!s) continue;
     const { a1, b1, a2, b2, T } = s, W1 = wt(a1) && wt(b1) ? 1 : 0, W2 = wt(a2) && wt(b2) ? 1 : 0;
     cs.push({ ids: [d.w1, d.w2], run(apply) {
@@ -298,11 +309,24 @@ function dimSetup(d) {
 
 // ---------- Modell-Operationen ----------
 function splitWall(w, x, y) {
+  // Öffnungen merken (absolute Lage), damit sie nach dem Teilen auf dem richtigen Teilstück landen
+  const ops = doc.openings.filter(o => o.wall === w.id);
+  let keep = [];
+  if (ops.length) { const f = wallFrame(w, geometry()); keep = ops.map(o => ({ o, p1: f.at(openingSpan(o, f).s1, 0) })); }
   const n = { id: uid(), x, y }; doc.nodes.push(n);
   if (w.line == null) w.line = uid();
   w.mass = null;                               // Maß galt für die ganze Wand
-  doc.walls.push({ id: uid(), a: n.id, b: w.b, thick: w.thick, side: w.side, dir: w.dir, line: w.line, mass: null });
+  const nw = { id: uid(), a: n.id, b: w.b, thick: w.thick, side: w.side, dir: w.dir, line: w.line, mass: null };
+  doc.walls.push(nw);
   w.b = n.id;
+  if (keep.length) {
+    const g = geometry();
+    for (const k of keep) {
+      const fw = wallFrame(w, g), sMid = fw.s(k.p1) + k.o.width / 2;
+      const target = sMid <= fw.len ? w : nw, ft = wallFrame(target, g);
+      k.o.wall = target.id; setSpan(k.o, ft, ft.s(k.p1));
+    }
+  }
   return n.id;
 }
 function resolve(sn) {
@@ -320,7 +344,8 @@ function cleanup() {
   const seen = new Set();
   doc.walls = doc.walls.filter(w => { const k = Math.min(w.a, w.b) + '-' + Math.max(w.a, w.b); if (seen.has(k)) return false; seen.add(k); return true; });
   doc.nodes = doc.nodes.filter(n => doc.walls.some(w => w.a === n.id || w.b === n.id));
-  doc.dims = doc.dims.filter(d => wallById(d.w1) && wallById(d.w2));
+  doc.dims = doc.dims.filter(d => d.kind === 'nalign' ? nodeById(d.n1) && nodeById(d.n2) && d.n1 !== d.n2 : wallById(d.w1) && wallById(d.w2));
+  doc.openings = doc.openings.filter(o => wallById(o.wall));
   // Linien neu ordnen: jedes zusammenhängende Stück bekommt eine eigene Kennung
   const byLine = new Map();
   for (const w of doc.walls) if (w.line != null) { if (!byLine.has(w.line)) byLine.set(w.line, []); byLine.get(w.line).push(w); }
@@ -341,6 +366,7 @@ function cleanup() {
 }
 function mergeNodes(src, dst) {
   for (const w of doc.walls) { if (w.a === src) w.a = dst; if (w.b === src) w.b = dst; }
+  for (const d of doc.dims) if (d.kind === 'nalign') { if (d.n1 === src) d.n1 = dst; if (d.n2 === src) d.n2 = dst; }
   doc.nodes = doc.nodes.filter(n => n.id !== src);
   cleanup();
 }
@@ -350,9 +376,10 @@ function placePoint(sn) {
   if (!chain) { chain = { from: sn }; refresh(); return; }
   const fp = chainFrom();
   if (dist(sn, fp) * view.s < 6) { endChain(); return; }   // erneut auf letzten Punkt = fertig
-  const before = snapshot();
+  const before = snapshot(), keep = keepOpenings();
   const a = resolve(chain.from), b = resolve(sn);
   if (a !== b && !hasWall(a, b)) doc.walls.push({ id: uid(), a, b, thick: settings().lastThick, side: 'C', dir: null, line: null, mass: null });
+  restoreOpenings(keep);
   const onExisting = sn.kind === 'node' || sn.kind === 'wall';
   chain = onExisting ? null : { from: { x: sn.x, y: sn.y, nodeId: b, kind: 'node' } };
   commit(before);
@@ -362,7 +389,9 @@ function endChain() { chain = null; if (!isMouse) cursor = null; refresh(); }
 function deleteSelection() {
   if (!sel) return;
   const before = snapshot();
-  if (sel.type === 'wall') { const ids = new Set(sel.ids); doc.walls = doc.walls.filter(w => !ids.has(w.id)); }
+  if (sel.type === 'opening') doc.openings = doc.openings.filter(o => o.id !== sel.id);
+  else if (sel.type === 'dim') doc.dims = doc.dims.filter(d => d.id !== sel.id);
+  else if (sel.type === 'wall') { const ids = new Set(sel.ids); doc.walls = doc.walls.filter(w => !ids.has(w.id)); }
   else doc.walls = doc.walls.filter(w => w.a !== sel.id && w.b !== sel.id);
   sel = null; cleanup(); commit(before);
 }
@@ -370,6 +399,13 @@ function deleteSelection() {
 // Ziehen: Ausgangszustand wiederherstellen, verschieben, Bedingungen lösen
 function applyDrag(g, wp) {
   doc = JSON.parse(g.before);
+  if (g.type === 'dragOpen') {   // Öffnung gleitet entlang der Wand
+    const o = doc.openings.find(x => x.id === g.id), f = wallFrame(wallById(o.wall), geometry());
+    const s1 = Math.max(f.sa, Math.min(f.sb - o.width, g.s0 + (wp.x - g.start.x) * f.u.x + (wp.y - g.start.y) * f.u.y));
+    const old = o.off; setSpan(o, f, s1); o.off = Math.round(o.off);
+    if (overlaps(o, f)) o.off = old;
+    return;
+  }
   const dx = wp.x - g.start.x, dy = wp.y - g.start.y;
   const groups = lineGroups(), pinned = new Set();
   if (g.type === 'dragNode') {
@@ -535,6 +571,22 @@ function alignLine(ids) {
   toast(`${ids.length} Wände auf eine Linie gebracht${removed ? ` · ${removed} Versprung entfernt` : ''}`);
 }
 const applyFlucht = (id1, id2) => alignLine([id1, id2]);
+// Ecken auf eine Linie: waagerecht (gleiche Höhe) oder senkrecht; die zuerst markierte Ecke bleibt stehen
+function alignNodes(ids, axis) {
+  if (ids.length < 2) return;
+  const before = snapshot(), ref = ids[0];
+  for (const id of ids.slice(1)) {
+    doc.dims = doc.dims.filter(d => !(d.kind === 'nalign' && ((d.n1 === ref && d.n2 === id) || (d.n1 === id && d.n2 === ref))));
+    doc.dims.push({ id: uid(), kind: 'nalign', n1: ref, n2: id, axis });
+  }
+  const bad = solve(new Set([ref]), 6000);
+  if (bad.size) {
+    doc = JSON.parse(before); conflict = bad;
+    toast('Geht nicht: widerspricht vorhandenen Maßen oder Winkeln (rot markiert)'); refresh(); return;
+  }
+  conflict = new Set(); commit(before);
+  toast(`${ids.length} Ecken ${axis === 'h' ? 'waagerecht' : 'senkrecht'} auf eine Linie gebracht`);
+}
 function dimScreen(d) {   // Maßlinie in Bildschirm-Koordinaten
   const s = dimSetup(d); if (!s) return null;
   // bei 30 % der Wand statt mittig, damit sich Abstand und Wandmaß nicht überdecken
@@ -546,7 +598,7 @@ function dimScreen(d) {   // Maßlinie in Bildschirm-Koordinaten
 }
 function hitDim(sp) {
   for (const d of doc.dims) {
-    if (d.kind === 'line') continue;
+    if (d.kind !== 'dist') continue;
     const s = dimScreen(d); if (s && distPtSeg(sp, s.p, s.q).d < 10) return d;
   }
   return null;
@@ -574,6 +626,125 @@ function detectOuter() {
   sel = ids.length ? { type: 'wall', ids } : null;
   commit(before);
   toast(ids.length ? `${ids.length} Außenwände gewählt – jetzt Dicke antippen` : 'Keine Außenwände erkannt (Umriss geschlossen?)');
+}
+
+// ---------- Stufe 5: Fenster und Türen ----------
+const OTYPES = { door: 'Tür', door2: 'Doppeltür', slide: 'Schiebetür', pass: 'Durchgang', window: 'Fenster' };
+// Bezugssystem einer Wand: s = Abstand entlang a→b, Versatz o quer (links positiv); sa/sb = Anfang/Ende der Innenfläche
+function wallFrame(w, g) {
+  const a = nodeById(w.a), b = nodeById(w.b), u = unit(a, b); if (!u) return null;
+  const nl = { x: -u.y, y: u.x }, [l, r] = wallOffsets(w), p = g.polys.get(w.id), len = dist(a, b);
+  const s = q => (q.x - a.x) * u.x + (q.y - a.y) * u.y;
+  let sa = 0, sb = len;
+  if (p) { const [AL, BR, BL, AR] = p; [sa, sb] = shownSide(w) === 'L' ? [s(AL), s(BR)] : [s(AR), s(BL)]; }
+  return { w, a, u, nl, l, r, sa, sb, len, s, n: q => (q.x - a.x) * nl.x + (q.y - a.y) * nl.y,
+    at: (sv, o) => ({ x: a.x + u.x * sv + nl.x * o, y: a.y + u.y * sv + nl.y * o }) };
+}
+// Lage einer Öffnung: Abstand (off) von der Innenfläche am Ende a oder b bis zur Öffnungskante
+const openingSpan = (o, f) => { const s1 = o.ref === 'a' ? f.sa + o.off : f.sb - o.off - o.width; return { s1, s2: s1 + o.width }; };
+function setSpan(o, f, s1) { o.off = Math.round((o.ref === 'a' ? s1 - f.sa : f.sb - s1 - o.width) * 10) / 10; }
+// Absolute Lage aller Öffnungen merken / nach Änderungen am Wandnetz wiederherstellen
+function keepOpenings() {
+  if (!doc.openings.length) return [];
+  const g = geometry();
+  return doc.openings.map(o => { const f = wallFrame(wallById(o.wall), g); return f ? { id: o.id, p1: f.at(openingSpan(o, f).s1, 0) } : null; }).filter(Boolean);
+}
+function restoreOpenings(keep) {
+  if (!keep.length) return;
+  const g = geometry();
+  for (const k of keep) {
+    const o = doc.openings.find(x => x.id === k.id), w = o && wallById(o.wall), f = w && wallFrame(w, g);
+    if (f) setSpan(o, f, f.s(k.p1));
+  }
+}
+const selOpening = () => (sel?.type === 'opening' ? doc.openings.find(o => o.id === sel.id) : null);
+function overlaps(o, f) {
+  const a = openingSpan(o, f);
+  return doc.openings.some(x => x !== o && x.wall === o.wall && (() => { const b = openingSpan(x, f); return a.s1 < b.s2 - 0.1 && b.s1 < a.s2 - 0.1; })());
+}
+function hitOpening(p, tol) {
+  const g = geometry();
+  for (const o of doc.openings) {
+    const w = wallById(o.wall), f = w && wallFrame(w, g); if (!f) continue;
+    const { s1, s2 } = openingSpan(o, f), s = f.s(p), n = f.n(p);
+    if (s >= s1 - tol / 2 && s <= s2 + tol / 2 && n <= f.l + tol && n >= -f.r - tol) return o;
+  }
+  return null;
+}
+function placeOpening(type, w, wp) {
+  const f = wallFrame(w, geometry()); if (!f) return;
+  const width = settings().lastW[type] || 90;
+  if (f.sb - f.sa < width) { toast('Wand ist zu kurz für diese Öffnung'); return; }
+  const sc = f.s(wp), s1 = Math.max(f.sa, Math.min(f.sb - width, sc - width / 2));
+  const before = snapshot();
+  const o = { id: uid(), wall: w.id, type, width, ref: sc - f.sa <= f.sb - sc ? 'a' : 'b', off: 0, hinge: 'start',
+    swing: innerSide(w) || (f.n(wp) >= 0 ? 'L' : 'R') };
+  setSpan(o, f, s1); o.off = Math.round(o.off);
+  if (overlaps(o, f)) { doc = JSON.parse(before); toast('Überschneidet sich mit einer anderen Öffnung'); refresh(); return; }
+  doc.openings.push(o); sel = { type: 'opening', id: o.id }; commit(before);
+}
+function applyOpening(widthM, offM) {
+  const o = selOpening(); if (!o) return;
+  const before = snapshot(), f = wallFrame(wallById(o.wall), geometry());
+  if (widthM > 0) o.width = Math.round(widthM * 1000) / 10;
+  if (offM >= 0) o.off = Math.round(offM * 1000) / 10;
+  const sp = openingSpan(o, f);
+  if (sp.s1 < f.sa - 0.5 || sp.s2 > f.sb + 0.5) { doc = JSON.parse(before); toast('So passt die Öffnung nicht in die Wand'); refresh(); return; }
+  if (overlaps(o, f)) { doc = JSON.parse(before); toast('Überschneidet sich mit einer anderen Öffnung'); refresh(); return; }
+  settings().lastW[o.type] = o.width; commit(before);
+}
+function changeOpening(fn) { const o = selOpening(); if (!o) return; const before = snapshot(); fn(o, wallFrame(wallById(o.wall), geometry())); commit(before); }
+// Polygon an der Ebene s = v abschneiden (Sutherland-Hodgman)
+function clipHalf(pts, f, v, keepGE) {
+  const out = [], S = p => f.s(p) - v, inside = p => (keepGE ? S(p) >= 0 : S(p) <= 0);
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length], ip = inside(p), iq = inside(q);
+    if (ip) out.push(p);
+    if (ip !== iq) { const sp = S(p), t = sp / (sp - S(q)); out.push({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t }); }
+  }
+  return out;
+}
+function wallPieces(w, poly, g) {   // Wandfläche ohne die Öffnungen
+  const ops = doc.openings.filter(o => o.wall === w.id); if (!ops.length) return [poly];
+  const f = wallFrame(w, g); if (!f) return [poly];
+  const spans = ops.map(o => openingSpan(o, f)).sort((p, q) => p.s1 - q.s1), pieces = [];
+  let lo = null;
+  for (const sp of spans) {
+    let pc = lo == null ? poly : clipHalf(poly, f, lo, true);
+    pc = clipHalf(pc, f, sp.s1, false); if (pc.length > 2) pieces.push(pc);
+    lo = lo == null ? sp.s2 : Math.max(lo, sp.s2);
+  }
+  const last = clipHalf(poly, f, lo, true); if (last.length > 2) pieces.push(last);
+  return pieces;
+}
+function drawOpenings(c, s, col, g) {
+  c.strokeStyle = col; c.lineCap = 'butt';
+  const lw = 1.8 / s;
+  const line = (p, q, wdt = lw) => { c.lineWidth = wdt; c.beginPath(); c.moveTo(p.x, p.y); c.lineTo(q.x, q.y); c.stroke(); };
+  for (const o of doc.openings) {
+    const w = wallById(o.wall), f = w && wallFrame(w, g); if (!f) continue;
+    const { s1, s2 } = openingSpan(o, f), L = f.l, R = -f.r, m = (L + R) / 2;
+    line(f.at(s1, L), f.at(s1, R)); line(f.at(s2, L), f.at(s2, R));   // Leibungen
+    if (o.type === 'window') {
+      line(f.at(s1, L), f.at(s2, L)); line(f.at(s1, R), f.at(s2, R));
+      const d = Math.max(1.5, (L - R) * 0.08);
+      line(f.at(s1, m - d), f.at(s2, m - d)); line(f.at(s1, m + d), f.at(s2, m + d));
+    } else if (o.type === 'slide') {
+      const d = Math.max(1.5, (L - R) * 0.12), wd = o.width * 0.55;
+      line(f.at(s1, m + d), f.at(s1 + wd, m + d), lw * 1.6); line(f.at(s2 - wd, m - d), f.at(s2, m - d), lw * 1.6);
+    } else if (o.type === 'door' || o.type === 'door2') {
+      const sw = o.swing === 'L' ? 1 : -1, face = sw > 0 ? L : R;
+      const leaves = o.type === 'door2' ? [[s1, o.width / 2, 1], [s2, o.width / 2, -1]]
+        : [o.hinge === 'end' ? [s2, o.width, -1] : [s1, o.width, 1]];
+      for (const [sh, len, along] of leaves) {
+        const h = f.at(sh, face), tip = f.at(sh, face + sw * len), closed = f.at(sh + along * len, face);
+        line(h, tip, lw * 1.4);
+        const a0 = Math.atan2(tip.y - h.y, tip.x - h.x), a1 = Math.atan2(closed.y - h.y, closed.x - h.x);
+        let d = a1 - a0; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+        c.lineWidth = lw * 0.7; c.beginPath(); c.arc(h.x, h.y, len, a0, a1, d < 0); c.stroke();
+      }
+    }
+  }
 }
 
 // Wandflächen mit sauberen Ecken (Gehrung) und Knotenflächen
@@ -646,7 +817,7 @@ function draw() {
     if (settings().transparent) drawChecker(); else { ctx.fillStyle = settings().bg; ctx.fillRect(0, 0, W, H); }
   } else drawGrid();
   ctx.setTransform(DPR * view.s, 0, 0, DPR * view.s, DPR * view.ox, DPR * view.oy);
-  drawPlan(ctx, ({ 7: 'final', 4: 'measure', 3: 'thick', 2: 'angles' })[stage] || 'sketch', view.s);
+  drawPlan(ctx, ({ 7: 'final', 5: 'open', 4: 'measure', 3: 'thick', 2: 'angles' })[stage] || 'sketch', view.s);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (stage !== 7) drawOverlay();
 }
@@ -684,18 +855,24 @@ function drawPlan(c, mode, s) {
   c.lineJoin = 'round';
   if (mode === 'final') {
     const col = wallColor(); c.fillStyle = col; c.strokeStyle = col; c.lineWidth = 1 / s;
-    for (const p of [...g.polys.values(), ...g.hubs]) { polyPath(c, p); c.fill(); c.stroke(); }
+    for (const h of g.hubs) { polyPath(c, h); c.fill(); c.stroke(); }
+    for (const w of doc.walls) {
+      const p = g.polys.get(w.id); if (!p) continue;
+      for (const pc of wallPieces(w, p, g)) { polyPath(c, pc); c.fill(); c.stroke(); }
+    }
+    drawOpenings(c, s, col, g);
     return;
   }
-  const base = mode === 'sketch' ? '#e7e5e0' : mode === 'measure' ? '#b8bcc4' : '#d1d5db';
+  const base = mode === 'sketch' ? '#e7e5e0' : mode === 'measure' ? '#b8bcc4' : mode === 'open' ? '#a3a8b1' : '#d1d5db';
   c.fillStyle = mode === 'thick' ? '#6b7280' : base;
   for (const h of g.hubs) { polyPath(c, h); c.fill(); }
   for (const w of doc.walls) {
     const p = g.polys.get(w.id); if (!p) continue;
     c.fillStyle = mode === 'thick' ? thickColor(w.thick) : base;
-    polyPath(c, p); c.fill();
+    for (const pc of wallPieces(w, p, g)) { polyPath(c, pc); c.fill(); }
   }
-  if (mode === 'thick' || mode === 'measure') return;
+  if (doc.openings.length) drawOpenings(c, s, '#374151', g);
+  if (mode === 'thick' || mode === 'measure' || mode === 'open') return;
   c.lineCap = 'round'; c.lineWidth = 2.5 / s;
   for (const w of doc.walls) {
     const a = nodeById(w.a), b = nodeById(w.b);
@@ -711,13 +888,35 @@ function label(text, x, y, color, small) {
   ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y + 1);
 }
 function drawOverlay() {
-  const g = stage === 3 || stage === 4 ? geometry() : null;
+  const g = stage >= 3 ? geometry() : null;
+  // Gewählte Öffnung (Stufe 5): Umriss und Abstände zu den Ecken
+  const so = stage === 5 && selOpening();
+  if (so) {
+    const f = wallFrame(wallById(so.wall), g);
+    if (f) {
+      const { s1, s2 } = openingSpan(so, f), pts = [f.at(s1, f.l), f.at(s2, f.l), f.at(s2, -f.r), f.at(s1, -f.r)].map(toScreen);
+      ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 3; polyPath(ctx, pts); ctx.stroke();
+      const side = shownSide(f.w), fo = side === 'L' ? f.l : -f.r, k = side === 'L' ? 1 : -1;
+      const at = sv => { const p = toScreen(f.at(sv, fo)); return { x: p.x - f.nl.x * k * 0 + f.nl.x * k * 18, y: p.y + f.nl.y * k * 18 }; };
+      const pa = at((f.sa + s1) / 2), pb = at((s2 + f.sb) / 2), pw = at((s1 + s2) / 2);
+      if (s1 - f.sa > 1) label(fmtLen(s1 - f.sa), pa.x, pa.y, so.ref === 'a' ? '#15803d' : '#6b7280', so.ref !== 'a');
+      if (f.sb - s2 > 1) label(fmtLen(f.sb - s2), pb.x, pb.y, so.ref === 'b' ? '#15803d' : '#6b7280', so.ref !== 'b');
+      label(fmtLen(so.width), pw.x, pw.y, '#1d4ed8');
+    }
+  }
   // Widersprüche
   for (const id of conflict) {
     const w = wallById(id); if (!w) continue;
     const a = toScreen(nodeById(w.a)), b = toScreen(nodeById(w.b));
     ctx.strokeStyle = 'rgba(220,38,38,.8)'; ctx.lineWidth = 8; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  // Ausgerichtete Ecken (Stufe 2): türkis gestrichelt
+  if (stage === 2) for (const d of doc.dims) if (d.kind === 'nalign') {
+    const p = nodeById(d.n1), q = nodeById(d.n2); if (!p || !q) continue;
+    const a = toScreen(p), b = toScreen(q);
+    ctx.setLineDash([3, 5]); ctx.strokeStyle = '#0891b2'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
   }
   // Fluchten (Stufe 2 und 4): gestrichelte Verbindung
   if (stage === 2 || stage === 4) for (const d of doc.dims) if (d.kind === 'line') {
@@ -739,7 +938,7 @@ function drawOverlay() {
       label(fmtLen(w.mass ? w.mass.v : faceLen(w, side, g)), x, y, col, !w.mass);
     }
     for (const d of doc.dims) {
-      if (d.kind === 'line') continue;
+      if (d.kind !== 'dist') continue;
       const s = dimScreen(d); if (!s) continue;
       const col = conflict.has(d.w1) && conflict.has(d.w2) ? '#dc2626' : '#15803d';
       ctx.strokeStyle = col; ctx.lineWidth = sel?.type === 'dim' && sel.id === d.id ? 3 : 1.5;
@@ -777,7 +976,7 @@ function drawOverlay() {
   // Eckpunkte und Winkel
   if (stage <= 2) {
     for (const n of doc.nodes) {
-      const p = toScreen(n), on = sel?.type === 'node' && sel.id === n.id;
+      const p = toScreen(n), on = (sel?.type === 'node' && sel.id === n.id) || (sel?.type === 'nodes' && sel.ids.includes(n.id));
       ctx.beginPath(); ctx.arc(p.x, p.y, on ? 7 : 4, 0, Math.PI * 2);
       ctx.fillStyle = on ? '#2563eb' : '#fff'; ctx.fill();
       ctx.strokeStyle = on ? '#1d4ed8' : '#374151'; ctx.lineWidth = 1.5; ctx.stroke();
@@ -831,7 +1030,7 @@ const evPos = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX
 function startPan(sp) { gesture = { type: 'pan', sp, ox0: view.ox, oy0: view.oy }; cv.classList.add('grabbing'); }
 function abortGesture() {
   const g = gesture;
-  if (g && (g.type === 'dragNode' || g.type === 'dragWall') && g.moved) doc = JSON.parse(g.before);
+  if (g && (g.type === 'dragNode' || g.type === 'dragWall' || g.type === 'dragOpen') && g.moved) doc = JSON.parse(g.before);
   gesture = null; cv.classList.remove('grabbing');
 }
 function startPinch() {
@@ -865,9 +1064,20 @@ cv.addEventListener('pointerdown', e => {
     const w1 = wallById(dimPick); dimPick = null;
     if (t === 'dim' && !parallel(w1, w)) { toast('Die Wände sind nicht parallel – erst Stufe 2 (Winkel) ausführen'); sel = null; refresh(); return; }
     if (t === 'flucht') { applyFlucht(w1.id, w.id); return; }
-    const ex = doc.dims.find(d => d.kind !== 'line' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
+    const ex = doc.dims.find(d => d.kind === 'dist' && ((d.w1 === w1.id && d.w2 === w.id) || (d.w1 === w.id && d.w2 === w1.id)));
     sel = ex ? { type: 'dim', id: ex.id, w1: ex.w1, w2: ex.w2 } : { type: 'dim', id: null, w1: w1.id, w2: w.id };
     refresh(); return;
+  }
+  if (stage === 5) {
+    const o = hitOpening(wp, tol);
+    if (o) {
+      sel = { type: 'opening', id: o.id };
+      const f = wallFrame(wallById(o.wall), geometry());
+      gesture = { type: 'dragOpen', id: o.id, before: snapshot(), start: wp, sp, s0: openingSpan(o, f).s1, moved: false };
+      refresh(); return;
+    }
+    if (OTYPES[t]) { const w = hitWall(wp, tol); if (w) { placeOpening(t, w, wp); return; } }
+    sel = null; startPan(sp); refresh(); return;
   }
   if (stage === 4) {
     const d = hitDim(sp);
@@ -891,7 +1101,14 @@ cv.addEventListener('pointerdown', e => {
     if (!add) sel = null;
     startPan(sp); refresh(); return;
   }
-  if (stage === 2 && (e.ctrlKey || e.metaKey || e.shiftKey)) {   // Strg+Klick: mehrere Wände markieren
+  if (stage === 2 && (e.ctrlKey || e.metaKey || e.shiftKey)) {   // Strg+Klick: mehrere Ecken bzw. Wände markieren
+    const n = hitNode(wp, tol);
+    if (n) {
+      const cur = sel?.type === 'nodes' ? sel.ids : sel?.type === 'node' ? [sel.id] : [];
+      const next = cur.includes(n.id) ? cur.filter(id => id !== n.id) : [...cur, n.id];
+      sel = next.length > 1 ? { type: 'nodes', ids: next } : next.length ? { type: 'node', id: next[0] } : null;
+      refresh(); return;
+    }
     const w = hitWall(wp, tol);
     if (w) {
       const cur = sel?.type === 'wall' ? sel.ids : [];
@@ -940,7 +1157,7 @@ function onUp(e) {
   } else if (g.type === 'dragNode' && g.moved) {
     if (g.mergeTo) { mergeNodes(g.id, g.mergeTo); sel = { type: 'node', id: g.mergeTo }; }
     commit(g.before);
-  } else if (g.type === 'dragWall' && g.moved) commit(g.before);
+  } else if ((g.type === 'dragWall' || g.type === 'dragOpen') && g.moved) commit(g.before);
   refresh();
 }
 cv.addEventListener('pointerup', onUp);
@@ -986,7 +1203,8 @@ function setStage(s) {
   stage = s; chain = null; cursor = null; cornerSwap = false; dimPick = null; conflict = new Set();
   if (s === 7 || s === 4 || sel?.type === 'dim' || (s === 3 && sel?.type === 'node')) sel = null;
   if (s !== 1 && (tool === 'wall' || tool === 'origin')) tool = 'select';
-  if ((s !== 4 && tool === 'dim') || (s !== 2 && tool === 'flucht')) tool = 'select';
+  if ((s !== 4 && tool === 'dim') || (s !== 2 && tool === 'flucht') || (s !== 5 && OTYPES[tool])) tool = 'select';
+  if (sel?.type === 'opening' && s !== 5) sel = null;
   if (s === 1 && tool === 'pan') tool = 'wall';
   refresh();
 }
@@ -1009,8 +1227,10 @@ function hintText() {
   if (t === 'flucht' || t === 'dim') return dimPick ? 'Zweite, parallele Wand anklicken'
     : t === 'flucht' ? 'Flucht: erste Wand anklicken (bleibt stehen), dann die Wand, die auf deren Linie soll'
       : 'Abstand: zwei parallele Wände anklicken, dann lichtes Maß in Metern eingeben';
+  if (stage === 5) return OTYPES[t] ? `${OTYPES[t]}: auf eine Wand klicken zum Einsetzen · vorhandene Öffnung anklicken/ziehen = bearbeiten/verschieben`
+    : 'Typ links wählen und auf eine Wand klicken · Öffnung anklicken = bearbeiten, ziehen = verschieben, Entf = löschen';
   if (stage === 4) return 'Wand anklicken → Innenmaß in Metern eingeben (Enter) · grün = gemessen, grau = gezeichnet';
-  if (stage === 2) return 'Strg+Klick = mehrere Wände markieren → „Auf eine Linie ausrichten“ · Orange = noch schief bzw. Richtung frei · Ecke antippen = Winkel setzen · Wand antippen = Richtung fixieren';
+  if (stage === 2) return 'Strg+Klick = mehrere Wände bzw. Ecken markieren → auf eine Linie ausrichten · Orange = noch schief bzw. Richtung frei · Ecke antippen = Winkel setzen · Wand antippen = Richtung fixieren';
   if (stage === 3) {
     const used = [...new Set(doc.walls.map(w => w.thick))].sort((a, b) => b - a);
     return 'Wand antippen (Strg+Klick = mehrere) · ' + used.map(t => `<i class="chip" style="background:${thickColor(t)}"></i>${fmtNum(t)} cm`).join('');
@@ -1047,6 +1267,19 @@ function renderProps() {
          ${[90, 135, 45].map(a => `<button data-act="ang" data-val="${a}">${a}°</button>`).join('')}
          <button data-act="swap" class="${cornerSwap ? 'on' : ''}">Andere Wand drehen</button>`
       : `<span class="info">Winkel nur an Ecken mit genau zwei Wänden einstellbar</span>`;
+    if (doc.dims.some(d => d.kind === 'nalign' && (d.n1 === sel.id || d.n2 === sel.id))) p.innerHTML += '<button data-act="nFree">Ecken-Ausrichtung lösen</button>';
+    p.innerHTML += '<span class="info">Strg+Klick = weitere Ecken markieren</span>';
+  } else if (stage === 5 && selOpening()) {
+    const o = selOpening(), isDoor = o.type === 'door' || o.type === 'door2';
+    p.innerHTML = `<select id="oType">${Object.entries(OTYPES).map(([k, v]) => `<option value="${k}"${k === o.type ? ' selected' : ''}>${v}</option>`).join('')}</select>
+      <span class="info">Breite</span><input id="oW" inputmode="decimal" value="${fmtM(o.width)}">
+      <span class="info">Abstand zur <b style="color:#15803d">grün</b> markierten Ecke</span><input id="oOff" inputmode="decimal" value="${fmtM(o.off)}">
+      <span class="info">m</span><button class="primary" data-act="oSet">Übernehmen</button><button data-act="oRef">Andere Ecke</button>
+      <span class="sep"></span>
+      ${isDoor ? `${o.type === 'door' ? '<button data-act="oHinge">Anschlag wechseln</button>' : ''}<button data-act="oSwing">Öffnet zur anderen Seite</button>` : ''}
+      <button class="danger" data-act="del">Löschen</button>`;
+  } else if (stage === 5) {
+    p.innerHTML = `<span class="info">${doc.openings.length} Öffnungen · grün = Bezugsmaß zur Ecke</span>`;
   } else if (stage === 4 && sel?.type === 'dim') {
     const d = doc.dims.find(x => x.id === sel.id);
     p.innerHTML = `<span class="info">Abstand (lichtes Maß)${d ? ` <b>${fmtLen(d.v)}</b>` : ''}</span>
@@ -1061,7 +1294,10 @@ function renderProps() {
       ${w.mass ? '<button class="danger" data-act="mDel">Maß löschen</button>' : ''}`;
   } else if (stage === 4) {
     const n = doc.walls.filter(w => w.mass).length, free = doc.walls.filter(w => w.dir == null).length;
-    p.innerHTML = `<span class="info">${n} von ${doc.walls.length} Wänden bemaßt · ${doc.dims.filter(d => d.kind !== 'line').length} Abstände${free ? ` · <b>${free} Wände ohne feste Richtung – erst Stufe 2</b>` : ''}</span>`;
+    p.innerHTML = `<span class="info">${n} von ${doc.walls.length} Wänden bemaßt · ${doc.dims.filter(d => d.kind === 'dist').length} Abstände${free ? ` · <b>${free} Wände ohne feste Richtung – erst Stufe 2</b>` : ''}</span>`;
+  } else if (stage === 2 && sel?.type === 'nodes') {
+    p.innerHTML = `<span class="info"><b>${sel.ids.length}</b> Ecken markiert · die zuerst markierte bleibt stehen</span>
+      <button class="primary" data-act="nAlignH">Waagerecht auf eine Linie</button><button class="primary" data-act="nAlignV">Senkrecht auf eine Linie</button>`;
   } else if (stage === 2 && ws.length > 1) {
     p.innerHTML = `<span class="info"><b>${ws.length}</b> Wände markiert · die zuerst markierte bleibt stehen</span>
       <button class="primary" data-act="alignLine">Auf eine Linie ausrichten</button>`;
@@ -1110,6 +1346,12 @@ $('#props').addEventListener('click', e => {
   else if (a === 'side') setSide('flip');
   else if (a === 'center') setSide('C');
   else if (a === 'outer') detectOuter();
+  else if (a === 'nAlignH' || a === 'nAlignV') alignNodes(sel.ids.slice(), a === 'nAlignH' ? 'h' : 'v');
+  else if (a === 'nFree') { const id = sel.id, before = snapshot(); doc.dims = doc.dims.filter(d => !(d.kind === 'nalign' && (d.n1 === id || d.n2 === id))); commit(before); }
+  else if (a === 'oSet') applyOpening(parseNum($('#oW').value), parseNum($('#oOff').value));
+  else if (a === 'oRef') changeOpening((o, f) => { const s1 = openingSpan(o, f).s1; o.ref = o.ref === 'a' ? 'b' : 'a'; setSpan(o, f, s1); });
+  else if (a === 'oHinge') changeOpening(o => { o.hinge = o.hinge === 'end' ? 'start' : 'end'; });
+  else if (a === 'oSwing') changeOpening(o => { o.swing = o.swing === 'L' ? 'R' : 'L'; });
   else if (a === 'alignLine') alignLine(sel.ids.slice())
   else if (a === 'mSet') applyMass(parseNum($('#mIn').value));
   else if (a === 'mSide') { meas.side = meas.side === 'L' ? 'R' : 'L'; refresh(); }
@@ -1127,8 +1369,12 @@ $('#props').addEventListener('keydown', e => {
   if (e.key === 'Escape') { sel = null; e.target.blur(); refresh(); return; }
   if (e.key !== 'Enter') return;
   if (e.target.id === 'mIn') (sel?.type === 'dim' ? applyDim : applyMass)(parseNum(e.target.value));
+  if (e.target.id === 'oW' || e.target.id === 'oOff') applyOpening(parseNum($('#oW').value), parseNum($('#oOff').value));
   if (e.target.id === 'angIn') setCornerAngle(sel.id, parseNum(e.target.value));
   if (e.target.id === 'thIn') setThick(parseNum(e.target.value));
+});
+$('#props').addEventListener('change', e => {
+  if (e.target.id === 'oType') changeOpening(o => { o.type = e.target.value; });
 });
 document.querySelectorAll('.stage').forEach(b => b.addEventListener('click', () => setStage(+b.dataset.stage)));
 document.querySelectorAll('.tool').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
@@ -1189,7 +1435,8 @@ function openExport() {
 const EXPORT_WIDTH = 2000, EXPORT_MARGIN = 50;
 function exportImage({ width = EXPORT_WIDTH, margin = EXPORT_MARGIN } = {}) {
   const b = bbox(); if (!b) return Promise.reject(new Error('leer'));
-  const pad = Math.max(0, ...doc.walls.map(w => w.thick)) + margin;
+  const swing = Math.max(0, ...doc.openings.filter(o => o.type === 'door' || o.type === 'door2').map(o => o.width));   // Türaufschlag nach außen
+  const pad = Math.max(0, ...doc.walls.map(w => w.thick)) + margin + swing;
   const x0 = b.x0 - pad, y0 = b.y0 - pad, bw = b.x1 - b.x0 + 2 * pad, bh = b.y1 - b.y0 + 2 * pad;
   let w = Math.max(200, Math.min(8000, Math.round(width))), h = Math.round(bh * w / bw);
   const maxArea = 16e6;                                  // Grenze für Canvas-Größe (iPad)
