@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Grundriss">
+<meta name="theme-color" content="#1f2937">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>Grundriss</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-stage="1">
+<header id="bar">
+  <div id="stages">
+    <button class="stage" data-stage="1">1 Skizze</button>
+    <button class="stage" data-stage="2" disabled title="folgt in v0.2">2 Winkel</button>
+    <button class="stage" data-stage="3" disabled title="folgt in v0.2">3 Dicke</button>
+    <button class="stage" data-stage="4" disabled title="folgt in v0.3">4 Maße</button>
+    <button class="stage" data-stage="5" disabled title="folgt in v0.4">5 Fenster/Türen</button>
+    <button class="stage" data-stage="6" disabled title="folgt in v0.5">6 Einrichtung</button>
+    <button class="stage" data-stage="7">7 Vorschau</button>
+  </div>
+  <div id="actions">
+    <button id="undo" title="Rückgängig (Strg+Z)">↶</button>
+    <button id="redo" title="Wiederholen (Strg+Y)">↷</button>
+    <button id="menuBtn" title="Menü">☰</button>
+  </div>
+</header>
+
+<main>
+  <nav id="tools">
+    <button class="tool sketch-only" data-tool="wall" title="Wand zeichnen (W)"><b>✎</b><span>Wand</span></button>
+    <button class="tool sketch-only" data-tool="select" title="Auswählen/Verschieben (V)"><b>⬚</b><span>Auswahl</span></button>
+    <button class="tool" data-tool="pan" title="Ansicht verschieben (H)"><b>✋</b><span>Ansicht</span></button>
+    <button id="fit" title="Alles zeigen (F)"><b>⤢</b><span>Alles</span></button>
+    <button id="orthoBtn" class="sketch-only toggle" title="Gerade Linien fangen (0°/45°/90°)"><b>∟</b><span>Fangen</span></button>
+    <button id="exportBtn2" class="preview-only" title="Bild exportieren"><b>⇩</b><span>Export</span></button>
+  </nav>
+  <div id="wrap">
+    <canvas id="cv"></canvas>
+    <div id="hint"></div>
+  </div>
+</main>
+
+<footer id="props"></footer>
+
+<div id="menu" hidden>
+  <label>Projektname <input id="projName" type="text"></label>
+  <button data-menu="new">Neues Projekt</button>
+  <button data-menu="save">Projekt speichern (.json)</button>
+  <button data-menu="open">Projekt öffnen …</button>
+  <label>Hintergrund (Vorschau &amp; Export)
+    <span class="row"><input id="bgColor" type="color" value="#ffffff"><label class="chk"><input id="bgTransp" type="checkbox"> transparent</label></span>
+  </label>
+  <button data-menu="export">Bild exportieren (PNG)</button>
+  <small id="ver"></small>
+</div>
+
+
+<input type="file" id="fileIn" accept=".json,application/json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
